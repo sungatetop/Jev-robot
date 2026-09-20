@@ -12,26 +12,44 @@
  * 这是“基于 Jev 的机器人控制”的可运行演示：Jev/本地引擎只负责做类型化
  * 决策，外围代码负责环境状态、置信度门控、执行与安全回退。
  */
+import type { EnvState, RobotDecision, DecisionPayload, DecisionEngine } from './jev/types.js';
+
+export interface SimulationOptions {
+  engine: DecisionEngine;
+  onDecision?: (payload: DecisionPayload) => void;
+  onEnv?: (env: EnvState) => void;
+  onGated?: (payload: DecisionPayload) => void;
+  loopMs?: number;
+  gate?: number;
+}
 
 export class Simulation {
-  constructor({ engine, onDecision, onEnv, onGated, loopMs = 3200, gate = 0.45 }) {
+  engine: DecisionEngine;
+  loopMs: number;
+  gate: number; // 置信度门控阈值
+  onDecision: (payload: DecisionPayload) => void;
+  onEnv: (env: EnvState) => void;
+  onGated: (payload: DecisionPayload) => void;
+  running = false;
+  tick = 0;
+  env: EnvState;
+
+  private timer: ReturnType<typeof setInterval> | null = null;
+
+  constructor({ engine, onDecision, onEnv, onGated, loopMs = 3200, gate = 0.45 }: SimulationOptions) {
     this.engine = engine;
     this.loopMs = loopMs;
-    this.gate = gate;          // 置信度门控阈值
-    this.onDecision = onDecision || (() => {});
-    this.onEnv = onEnv || (() => {});
-    this.onGated = onGated || (() => {});
-    this.running = false;
-    this.timer = null;
-    this.tick = 0;
-
-    this.env = this._freshEnv('idle');
+    this.gate = gate;
+    this.onDecision = onDecision ?? (() => {});
+    this.onEnv = onEnv ?? (() => {});
+    this.onGated = onGated ?? (() => {});
+    this.env = this.freshEnv('idle');
   }
 
-  _freshEnv(intent, extra = {}) {
+  freshEnv(intent: string, extra: Partial<EnvState> = {}): EnvState {
     return {
       intent,
-      userProximity: 0.85,     // 0 近 .. 1 远
+      userProximity: 0.85, // 0 近 .. 1 远
       obstacleAhead: false,
       energy: 1.0,
       objectsDetected: [],
@@ -42,7 +60,7 @@ export class Simulation {
   }
 
   /** 由 UI 触发场景事件，改变感知状态 */
-  triggerEvent(name) {
+  triggerEvent(name: string): EnvState {
     this.env.event = name;
     switch (name) {
       case 'arrival':
@@ -73,7 +91,7 @@ export class Simulation {
         this.env.note = '目标不明确，需要帮助';
         break;
       case 'reset':
-        this.env = this._freshEnv('idle');
+        this.env = this.freshEnv('idle');
         this.env.note = '恢复待机';
         break;
       default:
@@ -83,11 +101,18 @@ export class Simulation {
     return this.env;
   }
 
+  /** 外部（如 Pi 智能体）直接修补感知状态 */
+  patchEnv(patch: Partial<EnvState>): EnvState {
+    Object.assign(this.env, patch);
+    this.onEnv({ ...this.env });
+    return this.env;
+  }
+
   /** 一次决策步进 */
-  async step() {
+  async step(): Promise<DecisionPayload> {
     this.tick += 1;
     // 轻量环境自发漂移（能量消耗/随机扰动），模拟真实感知变化
-    this._drift();
+    this.drift();
     const env = { ...this.env };
 
     // 从引擎取决策（真实 Jev 或本地规则），结构已归一化
@@ -95,7 +120,7 @@ export class Simulation {
 
     // ===== 置信度门控：不够自信就回退到安全动作 =====
     const gated = decision.confidence != null && decision.confidence < this.gate;
-    let applied = decision;
+    let applied: RobotDecision = decision;
     if (gated) {
       applied = {
         ...decision,
@@ -105,13 +130,13 @@ export class Simulation {
       };
     }
 
-    const payload = {
+    const payload: DecisionPayload = {
       tick: this.tick,
       env,
       decision,
       applied,
       gated,
-      engine: decision.engine,
+      engine: decision.engine ?? 'local',
       ts: Date.now(),
     };
     if (gated) this.onGated(payload);
@@ -119,27 +144,27 @@ export class Simulation {
     return payload;
   }
 
-  _drift() {
+  private drift(): void {
     this.env.energy = Math.max(0.3, +(this.env.energy - 0.001).toFixed(3));
     if (this.env.intent === 'idle' && Math.random() < 0.02) {
       this.env.userProximity = Math.max(0.15, +(this.env.userProximity - 0.05).toFixed(2));
     }
   }
 
-  start() {
+  start(): void {
     if (this.running) return;
     this.running = true;
     this.step(); // 立即来一次
     this.timer = setInterval(() => this.step().catch(console.error), this.loopMs);
   }
 
-  stop() {
+  stop(): void {
     this.running = false;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
-  setLoopMs(ms) {
+  setLoopMs(ms: number): void {
     this.loopMs = ms;
     if (this.running) {
       this.stop();
@@ -147,7 +172,7 @@ export class Simulation {
     }
   }
 
-  dispose() {
+  dispose(): void {
     this.stop();
   }
 }

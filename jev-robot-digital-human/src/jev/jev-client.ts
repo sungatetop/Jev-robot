@@ -7,13 +7,27 @@
  */
 
 import { normalizeDecision, buildQuestions, buildState } from './semantics.js';
+import type { EnvState, RobotDecision, JevAnswers } from './semantics.js';
 
-export const DEFAULT_FALLBACK = { motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false };
-const JSON_HEADERS = { 'Content-Type': 'application/json' };
+export const DEFAULT_FALLBACK: RobotDecision = {
+  motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false,
+  confidence: 0, probabilities: null, raw: null,
+};
+const JSON_HEADERS: Record<string, string> = { 'Content-Type': 'application/json' };
 
-export async function callJev(statePayload, questionsPayload, { timeout = 12000, signal } = {}) {
-  const ctrl = signal ? signal : new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeout);
+export interface CallOptions {
+  timeout?: number;
+  signal?: AbortSignal;
+}
+
+export async function callJev(
+  statePayload: unknown,
+  questionsPayload: unknown,
+  { timeout = 12000, signal }: CallOptions = {},
+): Promise<{ model?: string; answers: JevAnswers; usage?: unknown }> {
+  const owned = new AbortController();
+  const ctrl = signal ?? owned.signal;
+  const timer = setTimeout(() => owned.abort(), timeout);
   try {
     const res = await fetch('/api/systemone', {
       method: 'POST',
@@ -23,17 +37,17 @@ export async function callJev(statePayload, questionsPayload, { timeout = 12000,
         model: 'jev-latest',
         questions: questionsPayload,
       }),
-      signal: ctrl.signal,
+      signal: ctrl,
     });
     const text = await res.text();
-    let json;
+    let json: { error?: string; answers?: JevAnswers };
     try { json = JSON.parse(text); } catch { json = { error: text.slice(0, 300) }; }
     if (!res.ok) {
       throw new Error(`TypeSafe API ${res.status}: ${json.error || text}`);
     }
-    return json;
+    return json as { answers: JevAnswers };
   } catch (err) {
-    if (err && err.name === 'AbortError') throw new Error('TypeSafe API timed out');
+    if (err instanceof Error && err.name === 'AbortError') throw new Error('TypeSafe API timed out');
     throw err;
   } finally {
     clearTimeout(timer);
@@ -41,7 +55,7 @@ export async function callJev(statePayload, questionsPayload, { timeout = 12000,
 }
 
 /** 把 Jev 原始响应转换为标准化决策；失败时抛错由上层回退。 */
-export async function decideWithRealJev(env, opts) {
+export async function decideWithRealJev(env: EnvState, opts?: CallOptions): Promise<RobotDecision> {
   const questions = buildQuestions(env);
   const state = buildState(env);
   const raw = await callJev(state, questions, opts);

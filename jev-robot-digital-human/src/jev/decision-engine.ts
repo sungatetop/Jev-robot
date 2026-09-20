@@ -11,20 +11,18 @@
  */
 
 import { decideWithRealJev } from './jev-client.js';
-import { MOTIONS, EXPRESSIONS, normalizeDecision, buildQuestions, buildState } from './semantics.js';
+import { normalizeDecision } from './semantics.js';
+import type { EnvState, RobotDecision, DecisionEngine } from './types.js';
 
 /** 本地规则引擎：把 env 状态映射为带概率/置信度的决策，结构对齐 Jev。 */
-class LocalMockEngine {
-  constructor() {
-    this.tick = 0;
-  }
+export class LocalMockEngine implements DecisionEngine {
+  private tick = 0;
 
   /** 规则打分，返回对每个 motion 的原始得分（未归一）。 */
-  scoreMotions(env) {
+  scoreMotions(env: EnvState): Record<string, number> {
     const s = env.userProximity ?? 1;
     const near = s < 0.5;
     const far = s > 0.7;
-    // 自增 tick，引入轻量“环境噪声”，让概率分布有变化感
     const waveBias = 4 + (env.intent === 'greet' ? 4 : 0) + (env.event === 'arrival' ? 3 : 0);
     return {
       idle: 5 + (env.intent === 'idle' ? 5 : 0) + (far ? 2 : 0),
@@ -37,7 +35,7 @@ class LocalMockEngine {
     };
   }
 
-  chooseFromScores(scores, jitter = 0) {
+  chooseFromScores(scores: Record<string, number>): { type: 'choice'; choice: string; probabilities: Record<string, number>; confidence: number } {
     // softmax 加权得到“伪概率”
     const exp = Object.fromEntries(
       Object.entries(scores).map(([k, v]) => [k, Math.exp(v * 0.55)])
@@ -49,74 +47,81 @@ class LocalMockEngine {
     return { type: 'choice', choice, probabilities: probs, confidence };
   }
 
-  scoreExpressions(env) {
+  scoreExpressions(env: EnvState): Record<string, number> {
     const near = env.userProximity < 0.5;
-    const s = {
+    return {
       neutral: 4 + (near ? 2 : 3),
       happy: (env.event === 'arrival' || env.intent === 'celebrate' || env.intent === 'greet') ? 6 : (near ? 3 : 1),
       sad: env.intent === 'comfort' ? 6 : 0.5,
       surprised: env.obstacleAhead ? 4 : (env.event === 'surprise' ? 5 : 0.5),
       angry: env.intent === 'warn' ? 6 : (env.obstacleAhead ? 2 : 0.5),
     };
-    return s;
   }
 
-  scoreIntensity(env) {
-    if (env.energy < 0.3) return { score: 0, legend: { 0: 'Low / calm', 1: 'Moderate', 2: 'High / lively' }, probabilities: { 0: 0.9, 1: 0.08, 2: 0.02 }, confidence: 0.9 };
-    if (['celebrate', 'march', 'dance'].includes(env.intent) || env.event === 'dance') {
-      return { score: 2, legend: { 0: 'Low / calm', 1: 'Moderate', 2: 'High / lively' }, probabilities: { 0: 0.03, 1: 0.12, 2: 0.85 }, confidence: 0.84 };
+  scoreIntensity(env: EnvState) {
+    if (env.energy < 0.3) {
+      return { type: 'score' as const, score: 0, legend: { '0': 'Low / calm', '1': 'Moderate', '2': 'High / lively' }, confidence: 0.9 };
     }
-    return { score: 1.2, legend: { 0: 'Low / calm', 1: 'Moderate', 2: 'High / lively' }, probabilities: { 0: 0.15, 1: 0.65, 2: 0.2 }, confidence: 0.62 };
+    if (['celebrate', 'march', 'dance'].includes(env.intent) || env.event === 'dance') {
+      return { type: 'score' as const, score: 2, legend: { '0': 'Low / calm', '1': 'Moderate', '2': 'High / lively' }, confidence: 0.84 };
+    }
+    return { type: 'score' as const, score: 1.2, legend: { '0': 'Low / calm', '1': 'Moderate', '2': 'High / lively' }, confidence: 0.62 };
   }
 
-  lookAtUser(env) {
+  lookAtUser(env: EnvState) {
     const noul = Math.max(0.05, Math.min(0.98, 1 - env.userProximity));
-    return { type: 'noul', noul };
+    return { type: 'noul' as const, noul };
   }
 
-  async decide(env) {
+  async decide(env: EnvState): Promise<RobotDecision> {
     this.tick += 1;
     const answers = {
-      action: this.chooseFromScores(this.scoreMotions(env), this.tick),
-      expression: this.chooseFromScores(this.scoreExpressions(env), this.tick),
+      action: this.chooseFromScores(this.scoreMotions(env)),
+      expression: this.chooseFromScores(this.scoreExpressions(env)),
       intensity: this.scoreIntensity(env),
       lookAtUser: this.lookAtUser(env),
     };
-    return normalizeDecision(answers, { motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false });
+    return normalizeDecision(answers, { motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false, confidence: 0, probabilities: null, raw: null });
   }
 }
 
 /** 真实 Jev 引擎，带失败回退。 */
-class RealJevEngine {
-  constructor({ fallbackEngine = new LocalMockEngine(), onError } = {}) {
+export class RealJevEngine implements DecisionEngine {
+  private fallbackEngine: DecisionEngine;
+  private onError?: (err: Error) => void;
+  lastError: Error | null = null;
+
+  constructor({ fallbackEngine = new LocalMockEngine(), onError }: {
+    fallbackEngine?: DecisionEngine;
+    onError?: (err: Error) => void;
+  } = {}) {
     this.fallbackEngine = fallbackEngine;
     this.onError = onError;
-    this.lastError = null;
   }
 
-  async decide(env, opts) {
+  async decide(env: EnvState): Promise<RobotDecision> {
     try {
-      const decision = await decideWithRealJev(env, opts);
+      const decision = await decideWithRealJev(env);
       decision.engine = 'jev';
       return decision;
     } catch (err) {
-      this.lastError = err;
-      if (this.onError) this.onError(err);
+      const e = err instanceof Error ? err : new Error(String(err));
+      this.lastError = e;
+      this.onError?.(e);
       // 回退本地引擎，保证演示不中断
       const decision = await this.fallbackEngine.decide(env);
       decision.engine = 'local';
-      decision.warning = err.message;
+      decision.warning = e.message;
       return decision;
     }
   }
 }
 
-export function createEngine(kind = 'auto') {
+export type EngineKind = 'auto' | 'real' | 'local';
+
+export function createEngine(kind: EngineKind = 'auto'): DecisionEngine {
   const local = new LocalMockEngine();
   if (kind === 'local') return local;
-  if (kind === 'real') return new RealJevEngine({ fallbackEngine: local });
-  // auto：真实优先，无法连通时向下回退（RealJevEngine 内部已处理）
+  // auto/real：真实优先，无法连通时向下回退（RealJevEngine 内部已处理）
   return new RealJevEngine({ fallbackEngine: local });
 }
-
-export { LocalMockEngine, RealJevEngine }; // 供 UI 直接 new/构造使用

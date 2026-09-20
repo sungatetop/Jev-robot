@@ -37,6 +37,23 @@
             <div class="hudbar"><i id="intensity-bar"></i></div>
           </div>
         </div>
+
+        <!-- Pi 慢思考智能体对话界面（System Two） -->
+        <div class="chat-dock" id="chat-dock">
+          <div class="chat-head">
+            <span class="chat-dot"></span>
+            <span class="chat-title">Pi · 慢思考智能体</span>
+            <span id="chat-status" class="chat-status">检查中…</span>
+            <button id="chat-collapse" class="chat-min" type="button">–</button>
+          </div>
+          <div class="chat-body" id="chat-body">
+            <div class="chat-msg assistant"><div class="bubble">你好！我是 Pi 智能体，负责机器人的慢思考规划。可以用自然语言指挥机器人，例如："欢迎一下我"、"跳个舞庆祝"、"前方有障碍物怎么办"。</div></div>
+          </div>
+          <form id="chat-form" class="chat-input">
+            <input id="chat-text" type="text" placeholder="对机器人说点什么…" autocomplete="off" />
+            <button type="submit" class="btn primary">发送</button>
+          </form>
+        </div>
       </section>
 
       <!-- 控制面板 -->
@@ -118,6 +135,6 @@
       </aside>
     </main>
 
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

@@ -11,7 +11,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 // 决策 motion 名 → 模型动画名的模糊映射（按优先级匹配）
-const MOTION_CLIP_HINTS = {
+const MOTION_CLIP_HINTS: Record<string, string[]> = {
   idle:    ['Idle', 'idle', 'Standing', 'standing', 'Tpose'],
   walk:    ['Walking', 'walk', 'Run', 'run'],
   wave:    ['Wave', 'wave', 'WaveHello'],
@@ -22,7 +22,7 @@ const MOTION_CLIP_HINTS = {
 };
 
 // 表情 morph target 名（若模型支持）
-const EXPRESSION_MORPHS = {
+const EXPRESSION_MORPHS: Record<string, Record<string, number>> = {
   neutral:   {},
   happy:     { smile: 1, joy: 1 },
   sad:       { sad: 1, browDown: 0.5 },
@@ -30,34 +30,50 @@ const EXPRESSION_MORPHS = {
   angry:     { angry: 1, browDown: 1 },
 };
 
+export interface GltfAvatarOptions {
+  height?: number;
+  showSkeleton?: boolean;
+}
+
+export interface DecisionInput {
+  motion?: string;
+  expression?: string;
+  intensity?: number;
+  lookAtUser?: boolean;
+}
+
 export class GltfAvatar extends THREE.Group {
-  constructor(url, { height = 1.8, showSkeleton = false } = {}) {
+  url: string;
+  targetHeight: number;
+  mixer: THREE.AnimationMixer | null = null;
+  clips: THREE.AnimationClip[] = [];
+  actions: Record<string, THREE.AnimationAction> = {};
+  currentAction: THREE.AnimationAction | null = null;
+  currentMotion = 'idle';
+  intensity = 1;
+  model: THREE.Group | null = null;
+  skeletonHelper: THREE.SkeletonHelper | null = null;
+  faceMeshes: THREE.Mesh[] = []; // 含 morphTarget 的网格
+  ready = false;
+
+  private _loadPromise: Promise<GltfAvatar> | null = null;
+  private _showSkeleton: boolean;
+
+  constructor(url: string, { height = 1.8, showSkeleton = false }: GltfAvatarOptions = {}) {
     super();
     this.url = url;
     this.targetHeight = height;
-    this.mixer = null;
-    this.clips = [];          // AnimationClip[]
-    this.actions = {};        // name -> AnimationAction
-    this.currentAction = null;
-    this.currentMotion = 'idle';
-    this.intensity = 1;
-    this.model = null;
-    this.skeletonHelper = null;
-    this.faceMeshes = [];     // 含 morphTarget 的网格
-    this.ready = false;
-    this._loadPromise = null;
     this._showSkeleton = showSkeleton;
-
-    this._load();
+    void this._load();
   }
 
-  async _load() {
+  private _load(): Promise<GltfAvatar> {
     if (this._loadPromise) return this._loadPromise;
     this._loadPromise = this._doLoad();
     return this._loadPromise;
   }
 
-  async _doLoad() {
+  private async _doLoad(): Promise<GltfAvatar> {
     const loader = new GLTFLoader();
     const gltf = await loader.loadAsync(this.url);
 
@@ -74,10 +90,11 @@ export class GltfAvatar extends THREE.Group {
       this.model.position.y = -box.min.y * s;
     }
     this.model.traverse((o) => {
-      if (o.isMesh) {
-        o.castShadow = true;
-        o.receiveShadow = true;
-        if (o.morphTargetInfluences) this.faceMeshes.push(o);
+      const mesh = o as THREE.Mesh;
+      if ((mesh as unknown as { isMesh?: boolean }).isMesh) {
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        if (mesh.morphTargetInfluences) this.faceMeshes.push(mesh);
       }
     });
     this.add(this.model);
@@ -103,7 +120,7 @@ export class GltfAvatar extends THREE.Group {
   }
 
   /** 按 motion 名匹配一个动画剪辑名 */
-  _findClip(motion) {
+  private _findClip(motion: string): string | undefined {
     const hints = MOTION_CLIP_HINTS[motion] || [];
     for (const hint of hints) {
       const found = this.clips.find((c) => c.name.toLowerCase().includes(hint.toLowerCase()));
@@ -114,7 +131,7 @@ export class GltfAvatar extends THREE.Group {
   }
 
   /** 平滑切换到目标动作（crossfade） */
-  playMotion(motion) {
+  playMotion(motion: string): void {
     if (!this.ready || !this.mixer) return;
     if (motion === this.currentMotion && this.currentAction) return;
 
@@ -134,18 +151,19 @@ export class GltfAvatar extends THREE.Group {
   }
 
   /** 外部决策入口 */
-  setDecision({ motion = 'idle', expression = 'neutral', intensity = 1, lookAtUser = false }) {
+  setDecision({ motion = 'idle', expression = 'neutral', intensity = 1 }: DecisionInput): void {
     if (motion) this.playMotion(motion);
     this.intensity = Math.max(0.1, intensity);
     if (this.currentAction) this.currentAction.timeScale = 0.6 + this.intensity * 0.5;
     this._applyExpression(expression);
   }
 
-  _applyExpression(name) {
+  private _applyExpression(name: string): void {
     const morphs = EXPRESSION_MORPHS[name] || {};
     for (const mesh of this.faceMeshes) {
       const dict = mesh.morphTargetDictionary || {};
       const inf = mesh.morphTargetInfluences;
+      if (!inf) continue;
       // 先归零
       for (let i = 0; i < inf.length; i++) inf[i] = 0;
       for (const [morphName, val] of Object.entries(morphs)) {
@@ -155,41 +173,40 @@ export class GltfAvatar extends THREE.Group {
     }
   }
 
-  showSkeleton(v) {
+  showSkeleton(v: boolean): void {
     if (this.skeletonHelper) this.skeletonHelper.visible = !!v;
   }
 
-  resetToBindPose() {
+  resetToBindPose(): void {
     if (this.currentAction) {
       this.currentAction.stop();
       this.currentAction = null;
     }
-    this.currentMotion = 'idle';
+    this.currentMotion = '';
     this.playMotion('idle');
   }
 
-  update(dt) {
+  update(dt: number): void {
     if (this.mixer) this.mixer.update(dt);
   }
 
-  whenReady() {
+  whenReady(): Promise<GltfAvatar> {
     return this._loadPromise || Promise.resolve(this);
   }
 
-  dispose() {
+  dispose(): void {
     if (this.mixer) {
       this.mixer.stopAllAction();
-      this.mixer.uncacheRoot(this.model);
+      if (this.model) this.mixer.uncacheRoot(this.model);
     }
-    if (this.skeletonHelper) this.skeletonHelper.dispose();
-    if (this.model) {
-      this.model.traverse((o) => {
-        if (o.isMesh) {
-          o.geometry?.dispose();
-          const mats = Array.isArray(o.material) ? o.material : [o.material];
-          mats.forEach((m) => m?.dispose());
-        }
-      });
-    }
+    this.skeletonHelper?.dispose();
+    this.model?.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if ((mesh as unknown as { isMesh?: boolean }).isMesh) {
+        mesh.geometry?.dispose();
+        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        mats.forEach((m) => m?.dispose());
+      }
+    });
   }
 }
