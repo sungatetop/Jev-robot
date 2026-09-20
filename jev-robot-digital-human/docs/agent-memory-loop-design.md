@@ -3,6 +3,13 @@
 > 状态：**已实施**（P1 感知入环 / P2 记忆存储 / P3 idle 整理 全部完成并验证）
 > 范围：jev-robot-digital-human
 > 日期：2026-09-20
+>
+> ⚠️ **实施演进说明**（2026-09-20 定稿）：本文写于设计阶段，最终实施时长期记忆方案有调整——
+> 由「服务端 weight 淘汰的 `data/long-term-memory.json`」演进为**「记忆即工具」**：
+> 记忆文件存于 `data/memory/*.md`，Agent 经 `read_memory`/`write_memory`/`read_recent_episodes`
+> 工具自主读写与组织；服务端（`memory-store.ts`）只提供存储与索引，`/api/agent/consolidate`
+> 不再接收 `{since}` 参数（回看范围由 Agent 自主决定）。本文其余内容（P1 感知入环、consolidate
+> 动作化、防抖/防重入）均按原设计落地。当前实态以 [architecture.md](./architecture.md) §8 为准。
 
 ---
 

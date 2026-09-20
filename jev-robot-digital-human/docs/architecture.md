@@ -28,7 +28,8 @@
 └─ 执行层  avatar/gltf-avatar.ts  Three.js GLB 数字人，AnimationMixer crossfade
 
 服务端（Vite 中间件 · Node）
-├─ 智能体层 server/pi-agent-server.ts  Pi Agent 单例 + 4 工具 + SSE 流式
+├─ 智能体层 server/pi-agent-server.ts  Pi Agent 单例 + SSE 流式 + 记忆端点（chat/consolidate/memory）
+├─ 工具层   server/tools.ts            createRobotTools(deps)：4 身体 + 3 记忆工具（第一人称）
 └─ 代理层   vite.config.ts             /api/systemone → api.typesafe.ai（Key 仅服务端）
 ```
 
@@ -65,11 +66,14 @@
 
 ```
 POST /api/agent/chat {message, env, lastDecision}
-  → Pi Agent (DeepSeek) 按需调用工具（第一人称视角）：
+  → Pi Agent (DeepSeek) 按需调用工具（第一人称视角，定义于 server/tools.ts）：
      get_robot_state      感知自己（env / 决策 / 行为状态快照）
      set_robot_intent     立心意 → sim.patchEnv()
      command_robot        直接表演（动作/表情/强度/朝向）
      trigger_scene_event  设想情景 → sim.triggerEvent()（走 Jev 快思考响应）
+     read_memory          翻开记忆文件细读（data/memory/*.md）
+     write_memory         写入/更新记忆文件（组织方式自主决定，读写后索引刷新）
+     read_recent_episodes 回顾最近与用户互动的情景流水
   → SSE 流式响应（浏览器手动读 res.body.getReader() 解析）：
      meta    {model}                          模型标识
      delta   {text}                           文本增量 → 气泡逐字追加
@@ -114,7 +118,7 @@ flowchart TB
         CHAT -->|"user_message perceive"| LOOP
     end
     subgraph S["服务端（Vite 中间件）"]
-        AGENT["智能体层 pi-agent-server.ts<br/>Pi Agent + DeepSeek + 4 工具"]
+        AGENT["智能体层 pi-agent-server.ts<br/>Pi Agent + DeepSeek + 7 工具"]
         PROXY["代理层 vite.config.ts<br/>/api/systemone → api.typesafe.ai"]
     end
     JEVM -->|"POST questions+state"| PROXY
@@ -131,6 +135,7 @@ flowchart TB
 4. **Key 安全**：LLM / Jev API Key 仅存服务端（.env + 代理），浏览器零接触。
 5. **Agent 第一人称**：工具描述与返回文本均以"你"叙述（智能体即机器人本体），系统提示词包含身份定位、双系统心智隐喻、行为原则。
 6. **边说边动**：SSE `command` 事件在工具执行时实时下发，不等文本生成完毕。
+7. **记忆即工具**：服务端只做"存储 + 索引"（memory-store.ts），记忆的组织与沉淀由 Agent 经 `read_memory`/`write_memory`/`read_recent_episodes` 自主完成——没有写死的提炼/合并流程；system prompt 只预加载记忆索引，细节按需细读。
 
 ## 7. 目录结构
 
@@ -152,8 +157,9 @@ jev-robot-digital-human/
 │  └─ avatar/gltf-avatar.ts    # Three.js GLB 数字人封装
 ├─ server/
 │  ├─ pi-agent-server.ts       # Pi 智能体（System Two）+ SSE + /api/agent/consolidate
-│  └─ memory-store.ts          # 三层记忆：episodes.jsonl / long-term-memory.json / 整理游标
-├─ data/                       # 记忆持久化（gitignore）：情景记忆 + 长期记忆
+│  ├─ tools.ts                 # Agent 工具集 createRobotTools(deps)：4 身体 + 3 记忆
+│  └─ memory-store.ts          # 记忆存储：episodes.jsonl（情景）+ data/memory/*.md（记忆文件）+ 索引
+├─ data/                       # 记忆持久化（gitignore）：情景记忆 + 记忆文件（Agent 自管）
 ├─ docs/
 │  ├─ architecture.md          # 本文档
 │  ├─ architecture-diagram.html# 架构示意图

@@ -13,8 +13,9 @@
 - **真实 Jev 决策引擎**：全部决策走真实 TypeSafe Jev；感知循环失败用 `idle` 安全动作兜底，消息响应失败默认转交慢思考
 - **置信度门控**：决策置信度低于阈值时强制回退到安全的 `idle` 动作
 - **类型化决策 schema**：动作(choice) + 表情(choice) + 强度(score) + 朝向(noul)，输出概率分布与置信度
-- **Pi 智能体工具集**：`get_robot_state` / `set_robot_intent` / `command_robot` / `trigger_scene_event`，指令经浏览器侧安全应用
+- **Pi 智能体工具集**：4 个身体能力（`get_robot_state` / `set_robot_intent` / `command_robot` / `trigger_scene_event`）+ 3 个记忆能力（`read_memory` / `write_memory` / `read_recent_episodes`），指令经浏览器侧安全应用
 - **对话界面（主交互）**：右侧面板对话区，SSE 流式回复逐字显示、工具轨迹实时追加、指令边说边动；参数配置收入弹出窗口
+- **记忆自整理**：情景记忆持久化 + Agent 自主管理的记忆文件（`data/memory/*.md`），闲时自主 consolidate 整理，重启后对话无缝续聊
 - **真实 GLB 数字人**：RobotExpressive / Xbot，骨骼动画 crossfade 平滑切换，morph 表情
 - **实时可视化**：决策概率条、置信度、门控判定、决策历史、感知状态 JSON
 - **场景事件模拟**：用户走近 / 前进 / 障碍物 / 指引 / 庆祝 / 不确定 → 触发新一轮决策
