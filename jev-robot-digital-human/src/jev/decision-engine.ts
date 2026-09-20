@@ -10,7 +10,7 @@
  * `createEngine` 根据场景自动选择；真实引擎失败时自动回退到本地引擎。
  */
 
-import { decideWithRealJev } from './jev-client.js';
+import { decideWithRealJev, decideMessageWithRealJev } from './jev-client.js';
 import { normalizeDecision } from './semantics.js';
 import type { EnvState, RobotDecision, DecisionEngine } from './types.js';
 
@@ -83,6 +83,36 @@ export class LocalMockEngine implements DecisionEngine {
     };
     return normalizeDecision(answers, { motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false, confidence: 0, probabilities: null, raw: null });
   }
+
+  /**
+   * 用户消息响应决策：关键词规则打分，「回复(说话)」与身体动作同台竞争。
+   * 问句/长句/复杂语义 → 倾向 reply（转慢思考）；明确动作词 → 直接执行动作。
+   */
+  async decideMessage(env: EnvState, message: string): Promise<RobotDecision> {
+    const m = message.toLowerCase();
+    const has = (re: RegExp) => re.test(m);
+    const scores: Record<string, number> = {
+      reply: 3,
+      wave: has(/嗨|哈喽|你好|您好|hello|hi\b|欢迎|挥手|招手|打个招呼/) ? 7 : 0.4,
+      dance: has(/跳舞|舞|庆祝|dance|celebrat|嗨起来/) ? 7 : 0.4,
+      walk: has(/走|走两步|前进|移动|过来|walk|move/) ? 6 : 0.4,
+      point: has(/指|方向|哪里|哪边|where|指南/) ? 5 : 0.4,
+      march: has(/踏步|原地走|行军|march/) ? 7 : 0.3,
+      shrug: has(/不知道|说不上来|无所谓|随便你|shrug/) ? 5 : 0.3,
+      idle: has(/停|停下|站好|休息|别动|stop|停一下/) ? 6 : 0.8,
+    };
+    // 问句 / 长句 / 需要语言表达的语义 → 增强说话倾向
+    if (has(/[?？]|为什么|怎么|什么|如何|介绍|讲|说说|聊|告诉我|你觉得|能不能|可以不|帮我/) || message.length > 18) {
+      scores.reply += 4.5;
+    }
+    const answers = {
+      action: this.chooseFromScores(scores),
+      expression: this.chooseFromScores(this.scoreExpressions(env)),
+      intensity: this.scoreIntensity(env),
+      lookAtUser: this.lookAtUser(env),
+    };
+    return normalizeDecision(answers, { motion: 'reply', expression: 'neutral', intensity: 1, lookAtUser: true, confidence: 0, probabilities: null, raw: null });
+  }
 }
 
 /** 真实 Jev 引擎，带失败回退。 */
@@ -110,6 +140,23 @@ export class RealJevEngine implements DecisionEngine {
       this.onError?.(e);
       // 回退本地引擎，保证演示不中断
       const decision = await this.fallbackEngine.decide(env);
+      decision.engine = 'local';
+      decision.warning = e.message;
+      return decision;
+    }
+  }
+
+  /** 消息响应决策：真实 Jev（动作集含 reply），失败回退本地规则。 */
+  async decideMessage(env: EnvState, message: string): Promise<RobotDecision> {
+    try {
+      const decision = await decideMessageWithRealJev(env, message);
+      decision.engine = 'jev';
+      return decision;
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      this.lastError = e;
+      this.onError?.(e);
+      const decision = await this.fallbackEngine.decideMessage(env, message);
       decision.engine = 'local';
       decision.warning = e.message;
       return decision;

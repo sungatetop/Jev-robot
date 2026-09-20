@@ -62,3 +62,19 @@ export async function decideWithRealJev(env: EnvState, opts?: CallOptions): Prom
   if (!raw || !raw.answers) throw new Error('Empty answers from TypeSafe API');
   return normalizeDecision(raw.answers, DEFAULT_FALLBACK);
 }
+
+/**
+ * 用户消息响应决策：把「回复（说话）」与身体动作一起交给 Jev 选择。
+ * 选中 reply → 上层转交慢思考（Pi）；选中其它动作 → 直接执行，不唤醒 LLM。
+ */
+export async function decideMessageWithRealJev(
+  env: EnvState,
+  message: string,
+  opts?: CallOptions,
+): Promise<RobotDecision> {
+  const questions = buildQuestions(env, { allowReply: true, userMessage: message });
+  const state = { ...buildState(env), userMessage: message };
+  const raw = await callJev(state, questions, opts);
+  if (!raw || !raw.answers) throw new Error('Empty answers from TypeSafe API');
+  return normalizeDecision(raw.answers, DEFAULT_FALLBACK);
+}

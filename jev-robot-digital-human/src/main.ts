@@ -72,6 +72,8 @@ const chat = new ChatPanel({
   getEnv: () => ({ ...sim.env }),
   getLastDecision: () => panel.lastDecision,
   applyCommand: applyAgentCommand,
+  // 用户消息先经 Jev 决策：选中「回复」→ 唤醒 Pi 慢思考；选中身体动作 → 快反射直接执行
+  decideMessage: (env, message) => sim.engine.decideMessage(env, message),
 });
 chat.bind();
 
@@ -91,7 +93,9 @@ function applyAgentCommand(cmd: AgentCommand): void {
       console.info('[pi-agent] trigger_event:', cmd.name);
       break;
     case 'command': {
-      // 直接指令：合成一条 pi-agent 引擎的决策，走统一应用/可视化路径
+      // 「回复」是说话动作，不是身体动作：由对话气泡本身呈现，不下发动画
+      if (cmd.motion === 'reply') break;
+      // 直接指令：合成一条决策，走统一应用/可视化路径（来源：Pi 智能体 或 Jev 消息路由）
       const d: RobotDecision = {
         motion: cmd.motion,
         expression: cmd.expression ?? 'neutral',
@@ -100,7 +104,7 @@ function applyAgentCommand(cmd: AgentCommand): void {
         confidence: null,
         probabilities: null,
         raw: cmd,
-        engine: 'pi-agent',
+        engine: cmd.engine ?? 'pi-agent',
       };
       panel.setDecision({
         tick: 0,
@@ -108,7 +112,7 @@ function applyAgentCommand(cmd: AgentCommand): void {
         decision: d,
         applied: d,
         gated: false,
-        engine: 'pi-agent',
+        engine: d.engine ?? 'pi-agent',
         ts: Date.now(),
       });
       console.info('[pi-agent] command:', cmd.motion);

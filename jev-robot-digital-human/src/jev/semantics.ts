@@ -7,7 +7,7 @@
  * 因此上层控制逻辑与引擎实现完全解耦。
  */
 
-export type Motion = 'idle' | 'walk' | 'wave' | 'dance' | 'point' | 'shrug' | 'march';
+export type Motion = 'idle' | 'walk' | 'wave' | 'dance' | 'point' | 'shrug' | 'march' | 'reply';
 export type Expression = 'neutral' | 'happy' | 'sad' | 'surprised' | 'angry';
 
 export interface EnvState {
@@ -45,11 +45,19 @@ export interface DecisionPayload {
   ts: number;
 }
 
-/** Pi 智能体（System Two）下发给机器人的指令 */
+/** Pi 智能体（System Two）/ Jev 消息路由下发给机器人的指令 */
 export type AgentCommand =
   | { type: 'set_intent'; intent: string; note?: string }
   | { type: 'trigger_event'; name: string }
-  | { type: 'command'; motion: string; expression?: string; intensity?: number; lookAtUser?: boolean };
+  | {
+      type: 'command';
+      motion: string;
+      expression?: string;
+      intensity?: number;
+      lookAtUser?: boolean;
+      /** 指令来源引擎（用于决策面板标签），默认 pi-agent */
+      engine?: string;
+    };
 
 /* ---------- Jev 问题/答案类型 ---------- */
 
@@ -86,7 +94,7 @@ export interface JevAnswers {
   lookAtUser?: NoulAnswer;
 }
 
-export const MOTIONS: Motion[] = ['idle', 'walk', 'wave', 'dance', 'point', 'shrug', 'march'];
+export const MOTIONS: Motion[] = ['idle', 'walk', 'wave', 'dance', 'point', 'shrug', 'march', 'reply'];
 export const EXPRESSIONS: Expression[] = ['neutral', 'happy', 'sad', 'surprised', 'angry'];
 
 export const MOTION_LABEL: Record<string, string> = {
@@ -97,6 +105,7 @@ export const MOTION_LABEL: Record<string, string> = {
   point: '指向 POINT',
   shrug: '耸肩 SHRUG',
   march: '踏步 MARCH',
+  reply: '回复 REPLY',
 };
 
 export const EXPRESSION_LABEL: Record<string, string> = {
@@ -110,9 +119,16 @@ export const EXPRESSION_LABEL: Record<string, string> = {
 /**
  * 构造发给 Jev 的问题集。criteria 里的文字会给模型足够语义。
  * @param ctx 上下文（如距障碍/用户距离、能量），可用于条件化 criteria
+ * @param opts.allowReply 把「回复（说话）」纳入动作选项——用于用户消息响应决策；
+ *        常规感知循环没有可回复的对象，不提供该选项
+ * @param opts.userMessage 用户刚说的话，注入 instructions 帮助语义判断
  */
-export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQuestion> {
+export function buildQuestions(
+  ctx: Partial<EnvState> = {},
+  opts: { allowReply?: boolean; userMessage?: string } = {},
+): Record<string, JevQuestion> {
   const nearUser = (ctx.userProximity ?? 1) < 0.5;
+  const msg = (opts.userMessage || '').trim();
   const actionOptions: Record<string, string> = {
     idle: 'Mission idle; relax and stand still with neutral posture.',
     walk: 'User asked to move or a waypoint is ahead; pace forward calmly.',
@@ -122,11 +138,21 @@ export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQ
     shrug: 'Uncertain or no clear way to help; shrug shoulders.',
     march: 'Energize or keep cadence; step in place with higher energy.',
   };
+  if (opts.allowReply) {
+    actionOptions.reply =
+      'The message needs language understanding, planning, or a verbal answer '
+      + '(questions, chats, requests about thoughts/plans, or anything a body motion cannot express); '
+      + 'respond by speaking — hand off to the slow-thinking system.';
+  }
+  const instructions = opts.allowReply
+    ? `The user just said to the robot: "${msg}". Decide how the robot should respond: `
+      + 'either a direct body motion (reflex, no words needed) or reply by speaking (slow thinking). '
+      + 'Which single action should it take?'
+    : 'Given the robot digital-human state, which single motion should it perform next?';
   return {
     action: {
       type: 'choice',
-      instructions:
-        'Given the robot digital-human state, which single motion should it perform next?',
+      instructions,
       criteria: actionOptions,
     },
     expression: {

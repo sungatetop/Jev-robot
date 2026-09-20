@@ -75,7 +75,9 @@ function resolveModel(): Promise<{ provider: string; id: string } | null> {
 
 /* ---------------- 系统提示词 ---------------- */
 
-const MOTION_HINT = MOTIONS.join('/');
+// 身体动作集：reply 是「说话」动作（由 Pi 的文本输出完成），不作为身体指令下发
+const BODY_MOTIONS = MOTIONS.filter((m) => m !== 'reply');
+const MOTION_HINT = BODY_MOTIONS.join('/');
 const EXPRESSION_HINT = EXPRESSIONS.join('/');
 
 const SYSTEM_PROMPT = `你就是这台 3D 舞台上的机器人本身——不是它的操作员，也不是它的助手或客服。正在打字和用户说话的，就是"你"：一个有身体、有感官、有情绪的机器人数字人。
@@ -116,9 +118,9 @@ const getStateTool: AgentTool<any> = {
 const setIntentTool: AgentTool<any> = {
   name: 'set_robot_intent',
   label: '给自己立心意',
-  description: `给自己设定一个持续性意图（如 ${MOTIONS.join('/')}），之后你的反射系统会朝这个方向自主行动。`,
+  description: `给自己设定一个持续性意图（如 ${BODY_MOTIONS.join('/')}），之后你的反射系统会朝这个方向自主行动。`,
   parameters: Type.Object({
-    intent: Type.Union(MOTIONS.map((m) => Type.Literal(m)), { description: `心意方向: ${MOTIONS.join('/')}` }),
+    intent: Type.Union(BODY_MOTIONS.map((m) => Type.Literal(m)), { description: `心意方向: ${BODY_MOTIONS.join('/')}` }),
     note: Type.Optional(Type.String({ description: '一句话说明你为什么这么想' })),
   }),
   execute: async (_id, params) => {
@@ -131,9 +133,9 @@ const setIntentTool: AgentTool<any> = {
 const commandTool: AgentTool<any> = {
   name: 'command_robot',
   label: '直接表演',
-  description: `立即亲自做一个动作（${MOTIONS.join('/')}），可带表情、强度(0-2)和是否面向用户。动作立即执行一次，不经反射循环。`,
+  description: `立即亲自做一个动作（${BODY_MOTIONS.join('/')}），可带表情、强度(0-2)和是否面向用户。动作立即执行一次，不经反射循环。说话不需要用它——你打的字就是你说的话。`,
   parameters: Type.Object({
-    motion: Type.Union(MOTIONS.map((m) => Type.Literal(m)), { description: `动作: ${MOTIONS.join('/')}` }),
+    motion: Type.Union(BODY_MOTIONS.map((m) => Type.Literal(m)), { description: `动作: ${BODY_MOTIONS.join('/')}` }),
     expression: Type.Optional(Type.Union(EXPRESSIONS.map((m) => Type.Literal(m)))),
     intensity: Type.Optional(Type.Number({ minimum: 0, maximum: 2, description: '0 低强度 .. 2 高强度' })),
     look_at_user: Type.Optional(Type.Boolean({ description: '是否面向用户' })),
