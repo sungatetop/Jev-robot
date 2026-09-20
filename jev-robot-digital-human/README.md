@@ -53,7 +53,9 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 ## 架构
 
-> 配套示意图：[architecture-diagram.html](./docs/architecture-diagram.html)（浏览器打开，矢量可缩放）· [architecture-diagram.png](./docs/architecture-diagram.png)
+![架构示意图](./docs/architecture-diagram.png)
+
+> 交互版示意图：[architecture-diagram.html](./docs/architecture-diagram.html)（浏览器打开，矢量可缩放）
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -121,11 +123,14 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 ```
 用户对话 → POST /api/agent/chat {message, env, lastDecision}
-  → Pi Agent (DeepSeek) 慢思考，按需调用工具：
-     get_robot_state     读取当前环境/决策/行为状态
-     set_robot_intent    修改机器人意图（patchEnv）
-     command_robot       直接下发动作/表情/强度/朝向
-     trigger_scene_event 注入场景事件（走 Jev 快思考响应）
+  → Pi Agent (DeepSeek) 慢思考，按需调用 7 个第一人称工具：
+     get_robot_state      感知自己（环境/决策/行为状态快照）
+     set_robot_intent     给自己立心意（patchEnv，交外层循环执行）
+     command_robot        直接表演（动作/表情/强度/朝向）
+     trigger_scene_event  设想情景（走 Jev 快思考响应）
+     read_memory          翻开记忆文件细读（data/memory/*.md）
+     write_memory         写入/更新记忆文件（组织方式自主决定）
+     read_recent_episodes 回顾最近情景流水
   → SSE 流式响应（浏览器手动读流解析，边生成边显示、边执行）：
      meta    {model}                                    模型标识
      delta   {text}                                     文本增量 → 气泡逐字追加
@@ -178,7 +183,7 @@ npm run typecheck   # tsc --noEmit 类型校验
 | `src/main.ts` | 装配根：场景/相机/渲染循环，panel ↔ sim ↔ avatar 接线，智能体指令应用，数字人切换（GLB 按包围盒归一化身高、脚底贴地） |
 | `src/loop.ts` | `Simulation`：环境状态、能量漂移、定时步进决策、置信度门控、`patchEnv` 意图修正、感知入环 `perceive`、行为回流 `noteAction`（内/外层行为统一账本）、整理执行链 `handleConsolidate` |
 | `src/jev/decision-engine.ts` | 唯一真实引擎 `RealJevEngine`（LocalMockEngine 已移除）；失败上抛，由调用方以 `idle` 兜底 |
-| `src/jev/semantics.ts` | 核心抽象：`buildQuestions` / `buildState` / `normalizeDecision`，两种引擎共用同一 schema |
+| `src/jev/semantics.ts` | 核心抽象：`buildQuestions` / `buildState` / `normalizeDecision`，感知决策与消息响应共用同一 schema |
 | `src/jev/jev-client.ts` | 纯 HTTP 客户端，超时与错误处理，不含 UI 逻辑 |
 | `src/ui/panel.ts` | 纯 DOM 组件：事件绑定、回调上抛、决策可视化 |
 | `src/ui/chat.ts` | 对话舱组件：健康检查、消息收发、SSE 流式解析（逐字显示 + 实时指令）、工具轨迹渲染 |
