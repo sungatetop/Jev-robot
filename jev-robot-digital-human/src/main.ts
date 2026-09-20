@@ -68,6 +68,8 @@ const chat = new ChatPanel({
   applyCommand: applyAgentCommand,
   // 用户消息先经 Jev 决策：选中「回复」→ 唤醒 Pi 慢思考；选中身体动作 → 快反射直接执行
   decideMessage: (env, message) => sim.engine.decideMessage(env, message),
+  // 感知入环：对话刺激（用户发言/智能体行为）写入感知循环，影响后续自主决策
+  perceive: (evt) => sim.perceive(evt),
 });
 chat.bind();
 
@@ -109,6 +111,8 @@ function applyAgentCommand(cmd: AgentCommand): void {
         engine: d.engine ?? 'pi-agent',
         ts: Date.now(),
       });
+      // 感知入环：指令执行回流感知循环（下次自主决策知道"我刚做过什么"）
+      sim.perceive({ type: 'agent_action', motion: cmd.motion, by: d.engine === 'jev' ? 'Jev 路由' : 'Pi', ts: Date.now() });
       console.info('[pi-agent] command:', cmd.motion);
       break;
     }

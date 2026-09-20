@@ -14,6 +14,13 @@
  */
 import type { EnvState, RobotDecision, DecisionPayload, DecisionEngine } from './jev/types.js';
 
+/** 感知事件：真实刺激（用户消息/智能体行为）进入感知循环的统一入口 */
+export type PerceptionEvent =
+  | { type: 'user_message'; text: string; ts: number }
+  | { type: 'agent_action'; motion: string; by: string; ts: number }
+  | { type: 'agent_reply'; summary: string; ts: number }
+  | { type: 'scene_event'; name: string; ts: number };
+
 export interface SimulationOptions {
   engine: DecisionEngine;
   onDecision?: (payload: DecisionPayload) => void;
@@ -55,8 +62,42 @@ export class Simulation {
       objectsDetected: [],
       event: null,
       note: '',
+      socialDrive: 0,
+      recentInteraction: '',
+      memoryDirty: false,
       ...extra,
     };
+  }
+
+  /* ---------- P1 感知入环：真实刺激即时更新 env ---------- */
+
+  /** 外部刺激即时写入感知状态（感知连续、决策周期）：用户消息/智能体行为 → 更新 env */
+  perceive(evt: PerceptionEvent): void {
+    this.applyPerception(evt);
+  }
+
+  /** 消费感知事件，更新内部状态（对话热度/用户距离/交互摘要） */
+  private applyPerception(evt: PerceptionEvent): void {
+    switch (evt.type) {
+      case 'user_message':
+        this.env.socialDrive = Math.min(1, this.env.socialDrive + 0.6);
+        this.env.userProximity = 0.2; // 用户开口 → 视为就在跟前
+        this.env.recentInteraction = `用户刚说: "${evt.text.slice(0, 40)}"`;
+        this.env.memoryDirty = true;
+        break;
+      case 'agent_action':
+        this.env.recentInteraction = `我刚做了动作 ${evt.motion}（来自 ${evt.by}）`;
+        this.env.memoryDirty = true;
+        break;
+      case 'agent_reply':
+        this.env.recentInteraction = `我刚回复了: "${evt.summary.slice(0, 40)}"`;
+        this.env.memoryDirty = true;
+        break;
+      case 'scene_event':
+        this.triggerEvent(evt.name);
+        break;
+    }
+    this.onEnv({ ...this.env });
   }
 
   /** 由 UI 触发场景事件，改变感知状态 */
@@ -161,6 +202,12 @@ export class Simulation {
 
   private drift(): void {
     this.env.energy = Math.max(0.3, +(this.env.energy - 0.001).toFixed(3));
+    // 社交驱动自然衰减（半衰期约 20s：每 3.2s 步 ×0.895）
+    this.env.socialDrive = Math.max(0, +(this.env.socialDrive * 0.895).toFixed(3));
+    // 用户距离缓慢回漂到默认远距（仅在无社交热度时，对话中保持"就在跟前"）
+    if (this.env.socialDrive <= 0.05) {
+      this.env.userProximity = Math.min(0.85, +(this.env.userProximity + 0.01).toFixed(2));
+    }
     if (this.env.intent === 'idle' && Math.random() < 0.02) {
       this.env.userProximity = Math.max(0.15, +(this.env.userProximity - 0.05).toFixed(2));
     }

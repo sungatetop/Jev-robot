@@ -6,6 +6,7 @@
  */
 import { MOTION_LABEL } from '../jev/semantics.js';
 import type { AgentCommand, EnvState, DecisionPayload, MessageResponseDecision } from '../jev/types.js';
+import type { PerceptionEvent } from '../loop.js';
 
 interface AgentChatResponse {
   reply?: string;
@@ -21,6 +22,8 @@ export interface ChatPanelOptions {
   applyCommand: (cmd: AgentCommand) => void;
   /** Jev 消息响应决策：各动作（含 reply）并行打分，阈值以上同时执行 */
   decideMessage: (env: EnvState, message: string) => Promise<MessageResponseDecision>;
+  /** 感知入环：对话中的刺激事件写入感知循环 */
+  perceive: (evt: PerceptionEvent) => void;
 }
 
 interface ChatMessageEl {
@@ -114,6 +117,8 @@ export class ChatPanel {
   private async send(text: string): Promise<void> {
     this.busy = true;
     this._append('user', text);
+    // 感知入环：用户发言作为真实刺激进入感知循环
+    this.opts.perceive({ type: 'user_message', text, ts: Date.now() });
 
     // ① Jev 消息响应决策：各动作（含 reply）并行打分，阈值以上同时执行
     const pending = this._append('assistant', 'Jev 感知中…');
@@ -141,6 +146,7 @@ export class ChatPanel {
           lookAtUser: route.lookAtUser,
           engine: route.engine,
         });
+        // 动作回流感知由 applyCommand → applyAgentCommand 统一处理
       }
     } else {
       wantsReply = true;
@@ -190,6 +196,8 @@ export class ChatPanel {
         pending.root.appendChild(t);
       }
       for (const cmd of data.commands || []) this.opts.applyCommand(cmd);
+      // 感知入环：Pi 的语言回复也是一次行为
+      if (data.reply) this.opts.perceive({ type: 'agent_reply', summary: data.reply, ts: Date.now() });
       if (data.model) {
         this.status.textContent = `● ${data.model}`;
         this.status.className = 'chat-status ok';

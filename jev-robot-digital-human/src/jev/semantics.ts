@@ -18,6 +18,10 @@ export interface EnvState {
   objectsDetected: string[];
   event: string | null;
   note: string;
+  /* ---- P1 感知入环：真实刺激带来的内部状态 ---- */
+  socialDrive: number; // 0..1 社交驱动（对话热度），用户消息抬升、随时间衰减
+  recentInteraction: string; // 最近交互摘要（用户说了什么/我刚做了什么），供决策理解上下文
+  memoryDirty: boolean; // 有未整理的新记忆（P3 idle 整理用）
 }
 
 /** 归一化后的决策意图（控制器/执行器直接消费） */
@@ -288,6 +292,9 @@ export function buildState(env: EnvState) {
     objectsDetected: env.objectsDetected ?? [],
     event: env.event ?? null,
     note: env.note ?? '',
+    socialDrive: +(env.socialDrive ?? 0).toFixed(2),
+    recentInteraction: env.recentInteraction ?? '',
+    memoryDirty: !!env.memoryDirty,
   };
 }
 
