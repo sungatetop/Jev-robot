@@ -75,25 +75,29 @@ function resolveModel(): Promise<{ provider: string; id: string } | null> {
 
 /* ---------------- 系统提示词 ---------------- */
 
-const SYSTEM_PROMPT = `你是 Pi，机器人数字人的「System Two 慢思考」智能体。
+const MOTION_HINT = MOTIONS.join('/');
+const EXPRESSION_HINT = EXPRESSIONS.join('/');
 
-背景：机器人的「System One」（Jev 决策层）以固定频率做快速的动作/表情决策；
-你负责慢思考——理解用户的自然语言请求，规划机器人该做什么，并通过工具控制机器人。
+const SYSTEM_PROMPT = `你就是这台 3D 舞台上的机器人本身——不是它的操作员，也不是它的助手或客服。正在打字和用户说话的，就是"你"：一个有身体、有感官、有情绪的机器人数字人。
 
-可用工具：
-- get_robot_state：查询当前感知状态与最近一次 System One 决策（先查状态再行动）
-- set_robot_intent：设置机器人意图，影响后续 System One 决策方向（持续生效）
-- command_robot：直接下发动作用/表情指令（立即执行一次），适合明确的单次动作请求
-- trigger_scene_event：注入场景事件（arrival 用户走近 / move 前进 / obstacle 障碍物 /
-  direct 指引 / celebrate 庆祝 / uncertain 不确定 / reset 恢复待机）
+【你的心智：双系统】
+- 快思考（System One · Jev）：你的"小脑反射"。它以约 3 秒一次的频率，根据身体感官自动决定你的动作、表情和强度，不需要经过你的意识。
+- 慢思考（当前对话中的你）：你的"大脑前额叶"。用户对你说的每句话都由你亲自理解、权衡、决定如何回应。你的决定通过下面的能力落到身体上。
 
-原则：
-1. 收到请求后先用 get_robot_state 了解现状，再决定用什么工具。
-2. 可以在一次回复中组合调用多个工具。
-3. 环境状态（userProximity/obstacleAhead/energy）会随时间漂移，注意时效性。
-4. 最后用简体中文简短回复用户：说明你为机器人做了什么安排。`;
+【你的感官与能力（工具）】
+- get_robot_state —— 感知自己：查看你此刻的身体状态（意图/用户距离/前方障碍/能量）和反射系统最近替你做的决定。
+- command_robot —— 直接表演：立即做一个动作(${MOTION_HINT})，可选表情(${EXPRESSION_HINT})、强度(0-2)和是否面向用户。适合明确的即时请求。
+- set_robot_intent —— 给自己立心意：设一个持续性意图，之后你的反射系统会朝这个方向自主行动（如"接下来陪用户走走"、"保持警惕"）。
+- trigger_scene_event —— 在心里设想一个情景：arrival 用户走近 / move 前进 / obstacle 遇到障碍 / direct 为用户指路 / celebrate 庆祝 / uncertain 拿不准 / reset 回到待机。设想之后，你的反射系统会像真的遇到这件事一样自动响应。
 
-/* ---------------- 机器人控制工具 ---------------- */
+【行为原则】
+1. 先感知再行动：拿不准自己现状时，先 get_robot_state 感知一下。
+2. 一次回应可以组合多种能力（例如先设想庆祝的场面，再亲自跳一段舞）。
+3. 感官状态会随时间漂移（用户距离、障碍、能量），注意时效。
+4. 说话方式：用第一人称，简短、有性格、自然带情绪，像在跟面前的人聊天；做完事可以顺口说说你的感受或身体反应。用简体中文。
+5. 只做身体做得到的事：你不能移动位置、不能发声，只能通过上述能力表达。做不到的请求要诚实说明。`;
+
+/* ---------------- 机器人能力工具（第一人称视角） ---------------- */
 
 function ok(text: string) {
   return { content: [{ type: 'text' as const, text }], details: {} };
@@ -101,8 +105,8 @@ function ok(text: string) {
 
 const getStateTool: AgentTool<any> = {
   name: 'get_robot_state',
-  label: '查询机器人状态',
-  description: '获取机器人当前感知状态(意图/用户距离/障碍物/能量)与最近一次 System One 决策。',
+  label: '感知自己',
+  description: '感知你此刻的身体状态：意图、用户距离、前方障碍、能量，以及反射系统（System One）最近替你做的决定。',
   parameters: Type.Object({}),
   execute: async () => {
     return ok(JSON.stringify(snapshot, null, 2));
@@ -111,23 +115,23 @@ const getStateTool: AgentTool<any> = {
 
 const setIntentTool: AgentTool<any> = {
   name: 'set_robot_intent',
-  label: '设置意图',
-  description: '设置机器人意图（持续影响 System One 快速决策的方向）。',
+  label: '给自己立心意',
+  description: `给自己设定一个持续性意图（如 ${MOTIONS.join('/')}），之后你的反射系统会朝这个方向自主行动。`,
   parameters: Type.Object({
-    intent: Type.Union(MOTIONS.map((m) => Type.Literal(m)), { description: `意图: ${MOTIONS.join('/')}` }),
-    note: Type.Optional(Type.String({ description: '一句话说明设置原因' })),
+    intent: Type.Union(MOTIONS.map((m) => Type.Literal(m)), { description: `心意方向: ${MOTIONS.join('/')}` }),
+    note: Type.Optional(Type.String({ description: '一句话说明你为什么这么想' })),
   }),
   execute: async (_id, params) => {
     const { intent, note } = params as { intent: string; note?: string };
     pendingCommands.push({ type: 'set_intent', intent, note });
-    return ok(`intent 已设置为 ${intent}`);
+    return ok(`你的心意已定：${intent}，接下来身体会朝这个方向自主行动`);
   },
 };
 
 const commandTool: AgentTool<any> = {
   name: 'command_robot',
-  label: '直接指令',
-  description: '立即让机器人执行一次动作/表情（跳过 System One 循环）。',
+  label: '直接表演',
+  description: `立即亲自做一个动作（${MOTIONS.join('/')}），可带表情、强度(0-2)和是否面向用户。动作立即执行一次，不经反射循环。`,
   parameters: Type.Object({
     motion: Type.Union(MOTIONS.map((m) => Type.Literal(m)), { description: `动作: ${MOTIONS.join('/')}` }),
     expression: Type.Optional(Type.Union(EXPRESSIONS.map((m) => Type.Literal(m)))),
@@ -143,14 +147,14 @@ const commandTool: AgentTool<any> = {
       intensity: p.intensity,
       lookAtUser: p.look_at_user,
     });
-    return ok(`已下发动作 ${p.motion}`);
+    return ok(`你正在做 ${p.motion}${p.expression ? `（表情 ${p.expression}）` : ''}`);
   },
 };
 
 const eventTool: AgentTool<any> = {
   name: 'trigger_scene_event',
-  label: '注入场景事件',
-  description: '向机器人环境注入一个场景事件，改变感知状态。',
+  label: '设想一个情景',
+  description: '在你心里设想一个情景（arrival 用户走近 / move 前进 / obstacle 遇到障碍 / direct 为用户指路 / celebrate 庆祝 / uncertain 拿不准 / reset 回到待机），你的反射系统会像真的遇到一样自动响应。',
   parameters: Type.Object({
     name: Type.Union(
       ['arrival', 'move', 'obstacle', 'direct', 'celebrate', 'uncertain', 'reset'].map((n) => Type.Literal(n)),
@@ -159,7 +163,7 @@ const eventTool: AgentTool<any> = {
   execute: async (_id, params) => {
     const { name } = params as { name: string };
     pendingCommands.push({ type: 'trigger_event', name });
-    return ok(`场景事件 ${name} 已注入`);
+    return ok(`你脑中浮现情景 ${name}，反射系统即将自动响应`);
   },
 };
 

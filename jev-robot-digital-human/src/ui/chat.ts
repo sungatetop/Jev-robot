@@ -1,8 +1,7 @@
 /**
  * 对话界面：用户 ↔ Pi 慢思考智能体（System Two）。
- *
- * 用户消息 POST /api/agent/chat，服务端 Pi Agent（带机器人控制工具）
- * 思考并执行工具后返回 { reply, commands, tools }；
+ * 静态嵌入右侧面板（主交互区）。用户消息 POST /api/agent/chat，
+ * 服务端 Pi Agent（带机器人能力工具）思考并执行后返回 { reply, commands, tools }；
  * commands 由外部回调应用到 Simulation/Avatar。
  */
 import type { AgentCommand, EnvState, DecisionPayload } from '../jev/types.js';
@@ -32,19 +31,16 @@ export class ChatPanel {
   private body!: HTMLDivElement;
   private input!: HTMLInputElement;
   private status!: HTMLElement;
-  private dock!: HTMLElement;
 
   constructor(opts: ChatPanelOptions) {
     this.opts = opts;
   }
 
   bind(): void {
-    this.dock = document.getElementById('chat-dock') as HTMLDivElement;
     this.body = document.getElementById('chat-body') as HTMLDivElement;
     this.input = document.getElementById('chat-text') as HTMLInputElement;
     this.status = document.getElementById('chat-status')!;
     const form = document.getElementById('chat-form') as HTMLFormElement;
-    const collapseBtn = document.getElementById('chat-collapse') as HTMLButtonElement;
 
     form.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -52,11 +48,6 @@ export class ChatPanel {
       if (!text || this.busy) return;
       this.input.value = '';
       void this.send(text);
-    });
-
-    collapseBtn.addEventListener('click', () => {
-      this.dock.classList.toggle('collapsed');
-      collapseBtn.textContent = this.dock.classList.contains('collapsed') ? '▢' : '–';
     });
 
     void this._checkHealth();

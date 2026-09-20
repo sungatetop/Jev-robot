@@ -60,7 +60,6 @@ panel.cbOnToggle = () => {
   if (sim.running) { sim.stop(); panel.setLoopRunning(false); }
   else { sim.start(); panel.setLoopRunning(true); }
 };
-panel.cbOnEvent = (name) => sim.triggerEvent(name);
 panel.cbOnLoopMs = (ms) => sim.setLoopMs(ms);
 panel.cbOnGate = (v) => { sim.gate = v; };
 panel.cbOnSkeleton = (v) => { skeletonVisible = v; avatarRef.current?.showSkeleton(v); };

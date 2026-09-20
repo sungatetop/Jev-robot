@@ -1,6 +1,6 @@
 /**
- * 控制面板 UI：引擎选择、场景事件、决策可视化(概率条/置信度)、
- * 状态/历史输出。纯 DOM，不依赖框架。
+ * 控制面板 UI：参数设置弹窗（引擎选择/滑块/数字人/骨骼）、
+ * 决策可视化(概率条/置信度)、紧凑状态总览。纯 DOM，不依赖框架。
  */
 import { MOTION_LABEL, EXPRESSION_LABEL } from '../jev/semantics.js';
 import type { RobotDecision, EnvState, DecisionPayload } from '../jev/types.js';
@@ -18,7 +18,6 @@ export class Panel {
   cbApply?: (decision: RobotDecision) => void;
   cbOnEngine?: (mode: string) => void;
   cbOnToggle?: () => void;
-  cbOnEvent?: (name: string) => void;
   cbOnLoopMs?: (ms: number) => void;
   cbOnGate?: (v: number) => void;
   cbOnSkeleton?: (v: boolean) => void;
@@ -32,10 +31,12 @@ export class Panel {
     );
     // 循环开关
     $('btn-toggle').addEventListener('click', () => this._onToggle());
-    // 场景事件
-    document.querySelectorAll<HTMLButtonElement>('[data-event]').forEach((b) =>
-      b.addEventListener('click', () => this._onEvent(b.dataset.event!))
-    );
+    // 参数设置弹窗
+    $('btn-settings').addEventListener('click', () => this._openSettings(true));
+    $('settings-close').addEventListener('click', () => this._openSettings(false));
+    $('settings-modal').addEventListener('click', (e) => {
+      if (e.target === $('settings-modal')) this._openSettings(false);
+    });
     // 滑块
     $('loop-ms').addEventListener('input', (e) => {
       const v = (e.target as HTMLInputElement).value;
@@ -57,6 +58,10 @@ export class Panel {
     );
   }
 
+  private _openSettings(open: boolean): void {
+    ($('settings-modal') as HTMLElement).hidden = !open;
+  }
+
   private _onEngine(mode: string): void {
     document.querySelectorAll<HTMLButtonElement>('[data-engine]').forEach((b) =>
       b.classList.toggle('active', b.dataset.engine === mode)
@@ -65,7 +70,6 @@ export class Panel {
   }
 
   private _onToggle(): void { this.cbOnToggle?.(); }
-  private _onEvent(name: string): void { this.cbOnEvent?.(name); }
   private _onLoopMs(ms: number): void { this.cbOnLoopMs?.(ms); }
   private _onGate(v: number): void { this.cbOnGate?.(v); }
   private _onSkeleton(checked: boolean): void { this.cbOnSkeleton?.(checked); }
@@ -88,6 +92,15 @@ export class Panel {
 
   setEnv(env: EnvState): void {
     $('state-json').textContent = JSON.stringify(env, null, 2);
+    // 紧凑总览：意图 / 距离 / 能量 / 障碍
+    $('env-intent').textContent = MOTION_LABEL[env.intent] || env.intent;
+    ($('env-prox-bar') as HTMLElement).style.width =
+      `${Math.max(0, Math.min(100, (1 - env.userProximity) * 100))}%`;
+    ($('env-energy-bar') as HTMLElement).style.width =
+      `${Math.max(0, Math.min(100, env.energy * 100))}%`;
+    const ob = $('env-obstacle');
+    ob.textContent = env.obstacleAhead ? '有' : '无';
+    ob.classList.toggle('danger', env.obstacleAhead);
   }
 
   setDecision(payload: DecisionPayload): void {
@@ -104,8 +117,10 @@ export class Panel {
     $('engine-emitter').textContent =
       payload.engine === 'jev' ? '真实 Jev' : payload.engine === 'pi-agent' ? 'Pi 智能体' : '本地引擎';
     $('confidence-num').textContent =
-      d.confidence != null ? (d.confidence * 100).toFixed(0) + '%' : '--';
-    $('conf-gate-num').textContent = (a.gated ? '已门控→IDLE' : '通过');
+      d.confidence != null ? `置信 ${(d.confidence * 100).toFixed(0)}%` : '置信 --';
+    const gate = $('conf-gate-num');
+    gate.textContent = a.gated ? '已门控→IDLE' : '通过';
+    gate.className = 'ds-chip gate ' + (a.gated ? 'blocked' : 'pass');
 
     ($('look-bar') as HTMLElement).style.width =
       `${Math.max(0, Math.min(100, (a.lookAtUser ? 1 : 0.2) * 100))}%`;
