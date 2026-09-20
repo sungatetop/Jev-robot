@@ -150,15 +150,30 @@ jev-robot-digital-human/
 │  │  ├─ panel.ts              # 决策可视化 + 参数弹窗 + cbApply
 │  │  └─ chat.ts               # 对话舱：SSE 流式解析、消息收发、工具轨迹
 │  └─ avatar/gltf-avatar.ts    # Three.js GLB 数字人封装
-├─ server/pi-agent-server.ts   # Pi 智能体（System Two）+ SSE
+├─ server/
+│  ├─ pi-agent-server.ts       # Pi 智能体（System Two）+ SSE + /api/agent/consolidate
+│  └─ memory-store.ts          # 三层记忆：episodes.jsonl / long-term-memory.json / 整理游标
+├─ data/                       # 记忆持久化（gitignore）：情景记忆 + 长期记忆
 ├─ docs/
 │  ├─ architecture.md          # 本文档
 │  ├─ architecture-diagram.html# 架构示意图
-│  └─ agent-memory-loop-design.md  # 记忆回环设计（P1 已实施）
+│  └─ agent-memory-loop-design.md  # 记忆回环设计（P1–P3 已全部实施）
 └─ vite.config.ts              # 代理层 + 服务端中间件挂载
 ```
 
-## 8. 后续规划
+## 8. 记忆回环（P1–P3 已实施）
 
-- **P2 记忆存储**：`server/memory-store.ts` + episodes 持久化（JSON/JSONL）+ Pi 重启续聊
-- **P3 idle 整理**：consolidate 动作化（整理也是 Jev 动作选项）+ `/api/agent/consolidate` + 长期记忆注入
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| **P1 感知入环** | `sim.perceive()` 事件队列：用户消息/Pi 行为/回复/场景事件即时写入 env（socialDrive/userProximity/recentInteraction/memoryDirty） | ✅ |
+| **P2 记忆存储** | `server/memory-store.ts`：情景记忆 `data/episodes.jsonl`（追加写，近 500 条驻内存）+ 记忆文件目录 `data/memory/*.md`（Agent 经工具自读写）；对话/动作/情景自动入档；服务重启把近 30 条对话回放为 Agent 消息（无缝续聊）；工作记忆注入 Jev（`recentDialogue` 最近 3 轮 + `lastConsolidatedAt` 游标随 buildState 下发） | ✅ |
+| **P3 idle 整理** | **整理也是动作**：`consolidate` 进入 Jev 决策空间（外层循环 choice 选项 + 消息响应 noul 打分）；执行层表现为静立沉思（idle + 0 强度）并调 `POST /api/agent/consolidate`，向主 Agent 发起"独处整理"内心活动；**记忆即工具**——Agent 经 `read_recent_episodes`/`read_memory`/`write_memory` 自己回顾经历、自己组织并写入 `data/memory/*.md` 记忆文件，服务端不写死任何提炼流程；system prompt 预加载记忆索引（文件名+标题+更新时间），读写后自动刷新；防抖 60s + 防重入 + 对话优先；结果以 💭 气泡呈现（Agent 自己的话） | ✅ |
+
+补充端点：`GET /api/agent/memory`（调试：记忆索引 + 最近情景）。
+
+关键实现细节：
+- **工具独立成文件**：全部 Agent 工具（4 身体 + 3 记忆）位于 `server/tools.ts`，`createRobotTools(deps)` 注入快照与指令通道。
+- **记忆 = 文件 + 工具**：记忆文件存于 `data/memory/*.md`（文件名白名单防路径穿越），Agent 自主决定记什么、记在哪、如何组织；system prompt 只预加载索引（`listMemoryIndex`），细节经 `read_memory` 按需细读——不是写死的流程。
+- Agent 的 `systemPrompt` 在初始化时物化为 `messages[0]` 的 system 消息（getter 只读），刷新索引需直接替换 `messages[0]`。
+- 情景回放的 assistant 消息必须是合法 `AssistantMessage`（content 为块数组 + api/provider/usage/stopReason 元数据），否则 LLM 请求会静默失败（`state.errorMessage` 有记录但 prompt() 不抛错）。
+- 情景记忆中的 Pi 回复取自本轮 SSE 流式增量文本，而非 extractReply 回捞（避免把上一轮旧回复重复入档）。

@@ -57,10 +57,12 @@ npm run typecheck   # tsc --noEmit 类型校验
 │  对话层  ui/chat.ts + index.html（右侧面板主交互区）           │
 │  自然语言输入 → /api/agent/chat → SSE 流式回复 + 工具轨迹 + 指令  │
 ├──────────────────────────────────────────────────────────────┤
-│  智能体层（System Two · 服务端）  server/pi-agent.ts           │
-│  Pi Agent 单例 + DeepSeek · 4 个机器人工具 · 请求串行化          │
-│  GET  /api/agent/health   健康检查（模型是否可用）               │
-│  POST /api/agent/chat     对话（SSE 流式：delta/tool/command）  │
+│  智能体层（System Two · 服务端）  server/pi-agent-server.ts     │
+│  Pi Agent 单例 + DeepSeek · 7 个工具（4 身体 + 3 记忆）· 请求串行化│
+│  GET  /api/agent/health       健康检查（模型是否可用）           │
+│  POST /api/agent/chat         对话（SSE 流式：delta/tool/command）│
+│  POST /api/agent/consolidate  记忆整理（发起 Agent 自主整理内心活动）│
+│  GET  /api/agent/memory       记忆查看（调试：记忆索引 + 最近情景） │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层  ui/panel.ts + index.html                              │
 │  面板绑定 · 决策可视化(概率/历史) · 场景事件按钮                  │
@@ -138,19 +140,49 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 **行为回环（状态账本统一）**：无论行为来自外层 Jev 决策（`jev-loop`）、消息快反射（`jev-route`）还是慢思考指令（`pi`），执行后都经 `sim.noteAction()` 写入 `env.currentAction`（当前动作/表情/来源/起始时间）与 `env.recentActions`（最近 5 条历史）。外层循环每轮决策都能看到"我此刻在做什么、做了多久、谁发起的"，实现真正的持续感知-决策-执行链。
 
+### 记忆回环（记忆即工具 + idle 自整理）
+
+**整理也是动作**：`consolidate`（整理记忆）作为动作选项进入 Jev 决策空间，与身体动作、说话同台打分。
+**记忆即工具**：记忆文件（`data/memory/*.md`）由 Agent 自己读写、自己组织——服务端只提供存储与索引，没有写死的提炼流程。
+
+```
+感知入环：对话/动作/情景 → sim.perceive() → env（socialDrive / recentInteraction /
+          memoryDirty / recentDialogue 最近3轮工作记忆）
+    │
+    ├─ 服务端情景记忆（data/episodes.jsonl，追加写）
+    │    用户消息 / Pi 回复 / 身体动作 / 场景事件 自动入档
+    │    服务重启 → 近 30 条对话回放为 Agent 消息（Pi 无缝续聊）
+    │
+    ├─ 记忆文件（data/memory/*.md，Agent 自管）
+    │    system prompt 预加载记忆索引（文件名 + 标题 + 更新时间）
+    │    read_memory 按需细读 · write_memory 自主增写（读写后索引自动刷新）
+    │
+    └─ memoryDirty=true + intent=idle + 没在对话中
+         → Jev 决策 consolidate（60s 防抖 + 防重入 + 对话优先）
+         → 机器人静立沉思（idle + 0 强度）
+         → POST /api/agent/consolidate：向主 Agent 发起"独处整理"内心活动
+              Agent 自主：read_recent_episodes 回顾经历 → read_memory 对照旧记忆
+              → write_memory 增量写入合适的记忆文件（记什么/记哪/怎么组织由它决定）
+         → env.memoryDirty=false · 💭 气泡展示 Agent 自己的整理小结
+```
+
+效果：与机器人聊几句后等它闲下来，它会"自己想一想"，把值得记的东西写进自己的记忆文件；重启服务后它仍然记得你的偏好（例如"用户最喜欢的音乐是电子舞曲"），并在后续对话中自然体现。
+
 ### 模块说明
 
 | 模块 | 职责 |
 |---|---|
 | `src/main.ts` | 装配根：场景/相机/渲染循环，panel ↔ sim ↔ avatar 接线，智能体指令应用，数字人切换（GLB 按包围盒归一化身高、脚底贴地） |
-| `src/loop.ts` | `Simulation`：环境状态、能量漂移、定时步进决策、置信度门控、`patchEnv` 意图修正、感知入环 `perceive`、行为回流 `noteAction`（内/外层行为统一账本） |
+| `src/loop.ts` | `Simulation`：环境状态、能量漂移、定时步进决策、置信度门控、`patchEnv` 意图修正、感知入环 `perceive`、行为回流 `noteAction`（内/外层行为统一账本）、整理执行链 `handleConsolidate` |
 | `src/jev/decision-engine.ts` | 唯一真实引擎 `RealJevEngine`（LocalMockEngine 已移除）；失败上抛，由调用方以 `idle` 兜底 |
 | `src/jev/semantics.ts` | 核心抽象：`buildQuestions` / `buildState` / `normalizeDecision`，两种引擎共用同一 schema |
 | `src/jev/jev-client.ts` | 纯 HTTP 客户端，超时与错误处理，不含 UI 逻辑 |
 | `src/ui/panel.ts` | 纯 DOM 组件：事件绑定、回调上抛、决策可视化 |
 | `src/ui/chat.ts` | 对话舱组件：健康检查、消息收发、SSE 流式解析（逐字显示 + 实时指令）、工具轨迹渲染 |
 | `src/avatar/gltf-avatar.ts` | 执行器：GLB 加载、动画剪辑模糊匹配、crossfade 切换、morph 表情 |
-| `server/pi-agent.ts` | Pi Agent 单例 + Vite 插件：模型解析（DeepSeek 优先）、4 个机器人工具、请求串行化 |
+| `server/pi-agent-server.ts` | Pi Agent 单例 + Vite 插件：模型解析（DeepSeek 优先）、请求串行化、SSE 流式对话、记忆整理端点（发起"独处整理"内心活动） |
+| `server/tools.ts` | Agent 工具集（第一人称）：4 个身体能力（感知/立心意/表演/设情景）+ 3 个记忆能力（读记忆/写记忆/回顾情景流水） |
+| `server/memory-store.ts` | 记忆存储：情景记忆（episodes.jsonl，追加写）+ 记忆文件目录（data/memory/*.md）+ 记忆索引 |
 
 ## 使用说明
 
@@ -159,12 +191,16 @@ npm run typecheck   # tsc --noEmit 类型校验
    - "欢迎一下我" → Pi 调用 `command_robot(wave, happy)` 直接执行
    - "跳个舞庆祝一下" → `command_robot(dance, happy)` + `trigger_scene_event(celebrate)`
    - "前方有障碍物怎么办" → `set_robot_intent(避障)`，后续 Jev 循环自主决策避让
-3. **参数设置**：点击右上角 `⚙ 参数设置` 打开弹窗——
+   - "记住哦，我最喜欢的音乐是电子舞曲" → 对话入情景记忆，闲时自动整理为长期记忆
+   - "休息一下吧，把刚才的事记一下" → 消息路由可触发 `consolidate` 整理记忆
+3. **记忆自整理**：启动循环后，机器人闲下来（idle + 有未整理记忆）会自主 `consolidate`——
+   静立沉思、提炼长期记忆，对话面板以 💭 气泡展示整理结果；重启 dev server 后对话无缝续聊
+4. **参数设置**：点击右上角 `⚙ 参数设置` 打开弹窗——
    决策间隔（800–6000ms）、置信度门控阈值（0–0.95）、数字人类型、骨骼调试
-4. **决策 · 状态总览**：面板底部紧凑展示引擎/置信度/门控/朝向 + 动作概率条 +
+5. **决策 · 状态总览**：面板底部紧凑展示引擎/置信度/门控/朝向 + 动作概率条 +
    意图/距离/能量/障碍；`感知状态与决策历史` 可展开查看原始 JSON 与历史
-5. **切换数字人**：设置弹窗中 `真实·机器人`（RobotExpressive）/ `真实·Xbot`
-6. **骨骼调试**：设置弹窗中 `显示骨骼` 叠加 SkeletonHelper；`重置绑定姿态` 复位动画
+6. **切换数字人**：设置弹窗中 `真实·机器人`（RobotExpressive）/ `真实·Xbot`
+7. **骨骼调试**：设置弹窗中 `显示骨骼` 叠加 SkeletonHelper；`重置绑定姿态` 复位动画
 
 ## 目录结构
 
@@ -176,7 +212,10 @@ jev-robot-digital-human/
 ├── .env                    # TYPESAFE_API_KEY / LLM_API_KEY 等
 ├── public/models/          # RobotExpressive.glb / Xbot.glb
 ├── server/
-│   └── pi-agent.ts         # Pi 智能体（System Two · DeepSeek）
+│   ├── pi-agent-server.ts  # Pi 智能体（System Two · DeepSeek）+ 记忆整理端点
+│   ├── tools.ts            # Agent 工具集（4 身体能力 + 3 记忆能力，第一人称）
+│   └── memory-store.ts     # 记忆存储（episodes.jsonl / memory/*.md / 记忆索引）
+├── data/                   # 记忆持久化（.gitignore，运行时自动创建）
 └── src/
     ├── main.ts             # 装配根 + 渲染循环 + 指令应用
     ├── loop.ts             # 决策循环 Simulation

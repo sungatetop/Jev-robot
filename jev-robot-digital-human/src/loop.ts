@@ -26,6 +26,8 @@ export interface SimulationOptions {
   onDecision?: (payload: DecisionPayload) => void;
   onEnv?: (env: EnvState) => void;
   onGated?: (payload: DecisionPayload) => void;
+  /** P3 idle 整理：Jev 决策 consolidate 后调用（服务端提炼长期记忆），返回整理摘要 */
+  onConsolidate?: () => Promise<string | null>;
   loopMs?: number;
   gate?: number;
 }
@@ -37,19 +39,22 @@ export class Simulation {
   onDecision: (payload: DecisionPayload) => void;
   onEnv: (env: EnvState) => void;
   onGated: (payload: DecisionPayload) => void;
+  onConsolidate: () => Promise<string | null>;
   running = false;
   tick = 0;
   env: EnvState;
 
   private timer: ReturnType<typeof setInterval> | null = null;
+  private consolidating = false; // 整理进行中（与用户消息响应互斥，防重入）
 
-  constructor({ engine, onDecision, onEnv, onGated, loopMs = 3200, gate = 0.45 }: SimulationOptions) {
+  constructor({ engine, onDecision, onEnv, onGated, onConsolidate, loopMs = 3200, gate = 0.45 }: SimulationOptions) {
     this.engine = engine;
     this.loopMs = loopMs;
     this.gate = gate;
     this.onDecision = onDecision ?? (() => {});
     this.onEnv = onEnv ?? (() => {});
     this.onGated = onGated ?? (() => {});
+    this.onConsolidate = onConsolidate ?? (async () => null);
     this.env = this.freshEnv('idle');
   }
 
@@ -65,6 +70,8 @@ export class Simulation {
       socialDrive: 0,
       recentInteraction: '',
       memoryDirty: false,
+      recentDialogue: [],
+      lastConsolidatedAt: null,
       currentAction: null,
       recentActions: [],
       ...extra,
@@ -99,7 +106,7 @@ export class Simulation {
     this.applyPerception(evt);
   }
 
-  /** 消费感知事件，更新内部状态（对话热度/用户距离/交互摘要） */
+  /** 消费感知事件，更新内部状态（对话热度/用户距离/交互摘要/工作记忆） */
   private applyPerception(evt: PerceptionEvent): void {
     switch (evt.type) {
       case 'user_message':
@@ -107,6 +114,7 @@ export class Simulation {
         this.env.userProximity = 0.2; // 用户开口 → 视为就在跟前
         this.env.recentInteraction = `用户刚说: "${evt.text.slice(0, 40)}"`;
         this.env.memoryDirty = true;
+        this.pushDialogue(`user: ${evt.text.slice(0, 40)}`);
         break;
       case 'agent_action':
         // 行为回流：内层（快反射/慢思考）执行的动作进入外层行为状态
@@ -116,12 +124,18 @@ export class Simulation {
       case 'agent_reply':
         this.env.recentInteraction = `我刚回复了: "${evt.summary.slice(0, 40)}"`;
         this.env.memoryDirty = true;
+        this.pushDialogue(`me: ${evt.summary.slice(0, 40)}`);
         break;
       case 'scene_event':
         this.triggerEvent(evt.name);
         break;
     }
     this.onEnv({ ...this.env });
+  }
+
+  /** 工作记忆：滚动保留最近 3 轮对话（user/me 各一条，旧→新） */
+  private pushDialogue(line: string): void {
+    this.env.recentDialogue = [...(this.env.recentDialogue ?? []), line].slice(-6);
   }
 
   /** 由 UI 触发场景事件，改变感知状态 */
@@ -210,6 +224,13 @@ export class Simulation {
       };
     }
 
+    // ===== P3 idle 整理：consolidate 是"整理记忆"动作，不是身体动作 =====
+    // 执行层表现为静立沉思（idle + 低强度），同时触发服务端记忆提炼
+    if (applied.motion === 'consolidate') {
+      applied = { ...applied, motion: 'idle', intensity: 0 };
+      void this.handleConsolidate();
+    }
+
     const payload: DecisionPayload = {
       tick: this.tick,
       env,
@@ -224,6 +245,32 @@ export class Simulation {
     // 行为回流：外层循环自身的决策也进入行为状态（内层/外层行为同一账本）
     this.noteAction(applied.motion, applied.expression, 'jev-loop');
     return payload;
+  }
+
+  /* ---------- P3 idle 整理：记忆固化行为 ---------- */
+
+  /**
+   * 执行记忆整理：防重入 + 60s 防抖，成功后由 onConsolidate 的实现方
+   * （main.ts）调用 markConsolidated 更新感知状态。
+   * 供两条路径复用：外层循环 Jev 决策、消息响应路由（用户说"记一下"）。
+   */
+  async handleConsolidate(): Promise<string | null> {
+    if (this.consolidating) return null;
+    if (this.env.lastConsolidatedAt && Date.now() - this.env.lastConsolidatedAt < 60_000) return null;
+    this.consolidating = true;
+    try {
+      return await this.onConsolidate();
+    } finally {
+      this.consolidating = false;
+    }
+  }
+
+  /** 整理完成：清除脏标记、记录游标、更新交互摘要（下次 Jev 决策可见"我刚整理过"） */
+  markConsolidated(summary: string): void {
+    this.env.memoryDirty = false;
+    this.env.lastConsolidatedAt = Date.now();
+    this.env.recentInteraction = `我刚整理完记忆: ${summary.slice(0, 60)}`;
+    this.onEnv({ ...this.env });
   }
 
   private drift(): void {

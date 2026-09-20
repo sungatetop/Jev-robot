@@ -44,9 +44,33 @@ const sim = new Simulation({
   onGated: (payload) => {
     console.warn('[gated] confidence', payload.decision.confidence, '< gate, fell back to idle');
   },
+  // P3 idle 整理：Jev 决策 consolidate → 服务端提炼长期记忆 → 感知状态更新 + 对话面板展示
+  onConsolidate: runConsolidation,
   loopMs: 3200,
   gate: 0.45,
 });
+
+/** 记忆整理执行器：POST /api/agent/consolidate，成功后更新感知状态并在对话面板展示 */
+async function runConsolidation(): Promise<string | null> {
+  try {
+    const res = await fetch('/api/agent/consolidate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}', // 整理过程由 Agent 经记忆工具自主完成，无需参数
+    });
+    if (!res.ok) return null;
+    // 摘要是 Agent 自己说的话；整理中顺带下发的身体指令（如思考姿态）就地应用
+    const data = (await res.json()) as { summary?: string; commands?: AgentCommand[] };
+    for (const cmd of data.commands ?? []) applyAgentCommand(cmd);
+    const summary = data.summary?.trim() || '这次没有要补记的内容';
+    sim.markConsolidated(summary);
+    chat.appendNote(`💭 ${summary}`);
+    return summary;
+  } catch (err) {
+    console.warn('[consolidate] 整理失败:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
 
 panel.bind();
 panel.cbApply = (decision) => applyProxy.current(decision);
@@ -70,6 +94,8 @@ const chat = new ChatPanel({
   decideMessage: (env, message) => sim.engine.decideMessage(env, message),
   // 感知入环：对话刺激（用户发言/智能体行为）写入感知循环，影响后续自主决策
   perceive: (evt) => sim.perceive(evt),
+  // P3 整理记忆：消息路由选中 consolidate → 复用外层循环的整理执行链（防重入+防抖）
+  consolidate: () => sim.handleConsolidate(),
 });
 chat.bind();
 

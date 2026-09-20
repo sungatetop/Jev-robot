@@ -13,11 +13,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin } from 'vite';
 import { Agent } from '@earendil-works/pi-agent-core';
-import type { AgentMessage, AgentTool } from '@earendil-works/pi-agent-core';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { Type } from 'typebox';
 import { builtinModels } from '@earendil-works/pi-ai/providers/all';
 import { MOTIONS, EXPRESSIONS } from '../src/jev/semantics';
 import type { AgentCommand, EnvState, DecisionPayload } from '../src/jev/types';
+import { appendEpisode, listEpisodes, listMemoryIndex } from './memory-store';
+import type { Episode, EpisodeKind } from './memory-store';
+import { createRobotTools } from './tools';
 
 /* ---------------- 模块级状态（每次对话请求刷新） ---------------- */
 
@@ -75,101 +78,148 @@ function resolveModel(): Promise<{ provider: string; id: string } | null> {
 
 /* ---------------- 系统提示词 ---------------- */
 
-// 身体动作集：reply 是「说话」动作（由 Pi 的文本输出完成），不作为身体指令下发
-const BODY_MOTIONS = MOTIONS.filter((m) => m !== 'reply');
+// 身体动作集：reply 是「说话」动作（由 Pi 的文本输出完成），consolidate 是「整理记忆」
+// 动作（由 Jev 外层循环触发 /api/agent/consolidate 完成），均不作为身体指令下发
+const BODY_MOTIONS = MOTIONS.filter((m) => m !== 'reply' && m !== 'consolidate');
 const MOTION_HINT = BODY_MOTIONS.join('/');
 const EXPRESSION_HINT = EXPRESSIONS.join('/');
 
 const SYSTEM_PROMPT = `你就是这台 3D 舞台上的机器人本身——不是它的操作员，也不是它的助手或客服。正在打字和用户说话的，就是"你"：一个有身体、有感官、有情绪的机器人数字人。
 
-【你的心智：双系统】
-- 快思考（System One · Jev）：你的"小脑反射"。它以约 3 秒一次的频率，根据身体感官自动决定你的动作、表情和强度，不需要经过你的意识。
-- 慢思考（当前对话中的你）：你的"大脑前额叶"。用户对你说的每句话都由你亲自理解、权衡、决定如何回应。你的决定通过下面的能力落到身体上。
+【你的心智：双循环】
+- 外循环（System One · Jev 快决策）：你的"小脑反射"。它以约 3 秒一次的频率，根据身体感官自主决定你的动作、表情和强度——你身体的每一个动作最终都由它执行。它会记账：你此刻在做什么、做了多久、谁发起的（快反射 / 消息快反射 / 慢思考）。
+- 内循环（System Two · 对话中的你）：你的"大脑前额叶"。你不直接驱动身体，而是通过两种方式触发外循环：
+  ① set_robot_intent / trigger_scene_event —— 给外循环"立心意、设情景"，它之后会像真的遇到这件事一样自主决策执行；
+  ② command_robot —— 让身体立即表演一次（即时请求）。
+- 执行结果会回流到你的感知：下一轮你能看到自己正在做什么、做了多久。外循环是常驻的，你"想"完之后身体由它接管。
+
+【始终以第一人称反馈自己的状态（最重要）】
+- 每条用户消息末尾都附有你的实时身体状态快照。回复时要自然带出你此刻的状态与感受（"我正跳到兴头上""我刚站定歇了口气""我注意到你走得很近"），像真人说话一样顺其自然。
+- 禁止旁观者/操作员口吻：不说"机器人正在跳舞""已为您执行挥手"，只说"我正在跳舞""我来挥挥手"。
+- 状态刚变化（新动作开始、被打断、能量变化）时，优先说出你的直接体验，再说别的。
 
 【你的感官与能力（工具）】
-- get_robot_state —— 感知自己：查看你此刻的身体状态（意图/用户距离/前方障碍/能量）和反射系统最近替你做的决定。
-- command_robot —— 直接表演：立即做一个动作(${MOTION_HINT})，可选表情(${EXPRESSION_HINT})、强度(0-2)和是否面向用户。适合明确的即时请求。
-- set_robot_intent —— 给自己立心意：设一个持续性意图，之后你的反射系统会朝这个方向自主行动（如"接下来陪用户走走"、"保持警惕"）。
-- trigger_scene_event —— 在心里设想一个情景：arrival 用户走近 / move 前进 / obstacle 遇到障碍 / direct 为用户指路 / celebrate 庆祝 / uncertain 拿不准 / reset 回到待机。设想之后，你的反射系统会像真的遇到这件事一样自动响应。
+- get_robot_state —— 感知自己：查看你此刻的身体状态（意图/用户距离/障碍/能量/社交热度/工作记忆/未整理记忆），以及行为账本——你正在做的动作、持续时长、发起者、最近行为历史。
+- command_robot —— 直接表演：立即做一个动作(${MOTION_HINT})，可选表情(${EXPRESSION_HINT})、强度(0-2)和是否面向用户。适合明确的即时请求；做完后外循环会接管后续。
+- set_robot_intent —— 给自己立心意：设一个持续性意图，之后外循环会朝这个方向自主行动（如"接下来陪用户走走"、"保持警惕"）。这是触发外循环的方式，不是直接控制。
+- trigger_scene_event —— 在心里设想一个情景：arrival 用户走近 / move 前进 / obstacle 遇到障碍 / direct 为用户指路 / celebrate 庆祝 / uncertain 拿不准 / reset 回到待机。设想之后，外循环会像真的遇到这件事一样自动响应。
+
+【你的记忆（你自己的文件，自主管理）】
+你拥有一套持久化的记忆文件（系统为你预加载了记忆索引，见下方）。记忆如何组织、记什么、记在哪里，由你自己决定：
+- read_memory —— 翻开某份记忆细读（更新前先读，避免弄丢已有内容）。
+- write_memory —— 把值得长期记住的内容写进记忆文件（不存在则创建，已存在则整篇覆盖）。
+- read_recent_episodes —— 回顾最近与用户互动的情景流水（用户说了什么/你回了什么/做了什么）。
+用户闲聊中提到值得记住的事，可以顺手记下；独处整理时刻（外循环发起）更要系统整理。
 
 【行为原则】
-1. 先感知再行动：拿不准自己现状时，先 get_robot_state 感知一下。
-2. 一次回应可以组合多种能力（例如先设想庆祝的场面，再亲自跳一段舞）。
+1. 先感知再行动：拿不准自己现状时，先 get_robot_state 感知一下；消息末尾的状态快照通常已够用。
+2. 一次回应可以组合多种能力（例如先设想庆祝的情景触发外循环，再亲自跳一段舞）。
 3. 感官状态会随时间漂移（用户距离、障碍、能量），注意时效。
-4. 说话方式：用第一人称，简短、有性格、自然带情绪，像在跟面前的人聊天；做完事可以顺口说说你的感受或身体反应。用简体中文。
+4. 说话方式：用第一人称，简短、有性格、自然带情绪，像在跟面前的人聊天；说完可以顺口说说你的感受或身体反应。用简体中文。
 5. 只做身体做得到的事：你不能移动位置、不能发声，只能通过上述能力表达。做不到的请求要诚实说明。`;
 
-/* ---------------- 机器人能力工具（第一人称视角） ---------------- */
+/* ---------------- 系统提示词组装：注入记忆索引 ---------------- */
 
-function ok(text: string) {
-  return { content: [{ type: 'text' as const, text }], details: {} };
+/** 组装 system prompt：基础身份 + 记忆索引（预加载，让 Agent 知道自己有哪些记忆文件） */
+function buildSystemPrompt(): string {
+  const index = listMemoryIndex();
+  if (!index.length) return SYSTEM_PROMPT;
+  const lines = index.map((m) => `- ${m.file.replace(/\.md$/, '')} —— ${m.title}（更新于 ${fmtTime(m.updatedAt)}）`);
+  return `${SYSTEM_PROMPT}
+
+【你的记忆索引（预加载）】
+${lines.join('\n')}
+用 read_memory 细读，用 write_memory 更新。索引在你每次读写后会刷新（下一轮生效）。`;
 }
 
-const getStateTool: AgentTool<any> = {
-  name: 'get_robot_state',
-  label: '感知自己',
-  description: '感知你此刻的身体状态：意图、用户距离、前方障碍、能量，以及反射系统（System One）最近替你做的决定。',
-  parameters: Type.Object({}),
-  execute: async () => {
-    return ok(JSON.stringify(snapshot, null, 2));
-  },
+function fmtTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+/** Agent 读写记忆后刷新 system prompt（systemPrompt 在初始化时物化为 messages[0]） */
+function refreshSystemPrompt(agent: Agent): void {
+  const msgs = agent.state.messages;
+  if (msgs[0]?.role === 'system') {
+    msgs[0] = { role: 'system', content: buildSystemPrompt() } as unknown as AgentMessage;
+  }
+}
+
+/* ---------------- 每条消息的实时身体状态注入 ---------------- */
+
+const SOURCE_LABEL: Record<string, string> = {
+  'jev-loop': '外循环快决策',
+  'jev-route': '消息快反射',
+  pi: '慢思考',
 };
 
-const setIntentTool: AgentTool<any> = {
-  name: 'set_robot_intent',
-  label: '给自己立心意',
-  description: `给自己设定一个持续性意图（如 ${BODY_MOTIONS.join('/')}），之后你的反射系统会朝这个方向自主行动。`,
-  parameters: Type.Object({
-    intent: Type.Union(BODY_MOTIONS.map((m) => Type.Literal(m)), { description: `心意方向: ${BODY_MOTIONS.join('/')}` }),
-    note: Type.Optional(Type.String({ description: '一句话说明你为什么这么想' })),
-  }),
-  execute: async (_id, params) => {
-    const { intent, note } = params as { intent: string; note?: string };
-    emitCommand({ type: 'set_intent', intent, note });
-    return ok(`你的心意已定：${intent}，接下来身体会朝这个方向自主行动`);
-  },
-};
+function proximityText(p: number | undefined): string {
+  if (p == null) return '未知';
+  if (p < 0.35) return '很近';
+  if (p < 0.6) return '附近';
+  return '较远';
+}
 
-const commandTool: AgentTool<any> = {
-  name: 'command_robot',
-  label: '直接表演',
-  description: `立即亲自做一个动作（${BODY_MOTIONS.join('/')}），可带表情、强度(0-2)和是否面向用户。动作立即执行一次，不经反射循环。说话不需要用它——你打的字就是你说的话。`,
-  parameters: Type.Object({
-    motion: Type.Union(BODY_MOTIONS.map((m) => Type.Literal(m)), { description: `动作: ${BODY_MOTIONS.join('/')}` }),
-    expression: Type.Optional(Type.Union(EXPRESSIONS.map((m) => Type.Literal(m)))),
-    intensity: Type.Optional(Type.Number({ minimum: 0, maximum: 2, description: '0 低强度 .. 2 高强度' })),
-    look_at_user: Type.Optional(Type.Boolean({ description: '是否面向用户' })),
-  }),
-  execute: async (_id, params) => {
-    const p = params as { motion: string; expression?: string; intensity?: number; look_at_user?: boolean };
-    emitCommand({
-      type: 'command',
-      motion: p.motion,
-      expression: p.expression,
-      intensity: p.intensity,
-      lookAtUser: p.look_at_user,
-    });
-    return ok(`你正在做 ${p.motion}${p.expression ? `（表情 ${p.expression}）` : ''}`);
-  },
-};
+/**
+ * 给用户消息附加实时身体状态快照（第一人称），让慢思考每轮都能"感到"自己
+ * 此刻在做什么、做了多久、谁发起的——支撑"始终以第一人称反馈自己的状态"。
+ * 情景记忆仍记录原始消息文本，快照只在当轮生效。
+ */
+function buildUserPrompt(message: string, env?: EnvState): string {
+  if (!env) return message;
+  const act = env.currentAction;
+  const doing = act
+    ? `${act.motion}${act.expression && act.expression !== 'neutral' ? `(${act.expression})` : ''} 已 ${Math.round((Date.now() - act.since) / 1000)} 秒 · 由${SOURCE_LABEL[act.source] || act.source}发起`
+    : '静立待机';
+  const lines = [
+    `此刻正在: ${doing}`,
+    `意图 ${env.intent} · 用户${proximityText(env.userProximity)} · ${env.obstacleAhead ? '前方有障碍' : '前方无障碍'} · 能量 ${Math.round((env.energy ?? 1) * 100)}% · 社交热度 ${(env.socialDrive ?? 0).toFixed(1)}`,
+  ];
+  if (env.recentActions?.length) lines.push(`最近行为: ${env.recentActions.join(' → ')}`);
+  if (env.recentInteraction) lines.push(`最近交互: ${env.recentInteraction}`);
+  if (env.recentDialogue?.length) lines.push(`最近对话: ${env.recentDialogue.join(' / ')}`);
+  if (env.memoryDirty) lines.push('有未整理的新记忆（闲时我会自己整理）');
+  return `${message}
 
-const eventTool: AgentTool<any> = {
-  name: 'trigger_scene_event',
-  label: '设想一个情景',
-  description: '在你心里设想一个情景（arrival 用户走近 / move 前进 / obstacle 遇到障碍 / direct 为用户指路 / celebrate 庆祝 / uncertain 拿不准 / reset 回到待机），你的反射系统会像真的遇到一样自动响应。',
-  parameters: Type.Object({
-    name: Type.Union(
-      ['arrival', 'move', 'obstacle', 'direct', 'celebrate', 'uncertain', 'reset'].map((n) => Type.Literal(n)),
-    ),
-  }),
-  execute: async (_id, params) => {
-    const { name } = params as { name: string };
-    emitCommand({ type: 'trigger_event', name });
-    return ok(`你脑中浮现情景 ${name}，反射系统即将自动响应`);
-  },
-};
+[[此刻身体状态（实时注入）]]
+${lines.join('\n')}`;
+}
 
-const robotTools: Array<AgentTool<any>> = [getStateTool, setIntentTool, commandTool, eventTool];
+/* ---------------- 情景记忆记录 ---------------- */
+
+function recordEpisode(kind: EpisodeKind, text: string, actions?: string[]): void {
+  if (!text || !text.trim()) return;
+  const ep: Episode = { ts: Date.now(), kind, text: text.trim() };
+  if (actions?.length) ep.actions = actions;
+  appendEpisode(ep);
+}
+
+/** 服务启动/Agent 创建时：把最近的对话情景回放为 Agent 消息，实现重启续聊 */
+function replayEpisodesAsMessages(limit = 30): AgentMessage[] {
+  const msgs: AgentMessage[] = [];
+  for (const ep of listEpisodes(limit)) {
+    if (ep.kind === 'user_message') {
+      msgs.push({ role: 'user', content: ep.text } as unknown as AgentMessage);
+    } else if (ep.kind === 'agent_reply') {
+      // 合法的 AssistantMessage（content 必须是块数组，且需 api/provider/usage/stopReason 元数据）
+      msgs.push({
+        role: 'assistant',
+        content: [{ type: 'text', text: ep.text }],
+        api: 'openai-completions',
+        provider: 'replay',
+        model: 'replayed-from-episodes',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+      } as unknown as AgentMessage);
+    }
+  }
+  return msgs;
+}
 
 /* ---------------- Agent 会话（单例，串行处理请求） ---------------- */
 
@@ -184,11 +234,13 @@ function getAgent(): Promise<Agent | null> {
     agentPromise = (async () => {
       const agent = new Agent({
         initialState: {
-          systemPrompt: SYSTEM_PROMPT,
+          systemPrompt: buildSystemPrompt(),
           model,
           thinkingLevel: 'low',
-          tools: robotTools,
-          messages: [],
+          // 工具集（身体能力 + 记忆能力）独立维护于 server/tools.ts
+          tools: createRobotTools({ getSnapshot: () => snapshot, emitCommand }),
+          // 重启续聊：把最近的对话情景回放为消息历史（记忆经 systemPrompt 索引 + 工具按需细读）
+          messages: replayEpisodesAsMessages(),
         },
         streamFn: models.streamSimple.bind(models),
         convertToLlm: (msgs: AgentMessage[]) =>
@@ -279,6 +331,8 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     snapshot = { env: body.env, lastDecision: body.lastDecision ?? null };
     pendingCommands = [];
     toolTrace = [];
+    // 情景记忆：用户发言入档（Pi 回复与动作在对话结束后入档）
+    recordEpisode('user_message', message);
 
     // SSE 流式响应
     res.writeHead(200, {
@@ -292,6 +346,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
       if (!closed) sseSend(res, event, data);
     };
 
+    // 流式增量文本：既转发给前端，也作为本次运行"真正说了什么"的凭据（情景记忆用）。
+    // 不用 extractReply 兜底——它会回捞上一轮的旧回复，导致重复入档。
+    let streamedText = '';
+
     const m = await resolveModel();
     send('meta', { model: m ? `${m.provider}/${m.id}` : '' });
 
@@ -303,7 +361,10 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
             // 文本增量 → 流式回复
             if (event.type === 'message_update') {
               const ame = event.assistantMessageEvent as { type?: string; delta?: string };
-              if (ame?.type === 'text_delta' && ame.delta) send('delta', { text: ame.delta });
+              if (ame?.type === 'text_delta' && ame.delta) {
+                streamedText += ame.delta;
+                send('delta', { text: ame.delta });
+              }
               return;
             }
             // 工具调用开始 → 实时轨迹
@@ -318,8 +379,9 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
           });
           onCommandEmitted = (cmd) => send('command', cmd);
           // prompt 完成或失败都要结束本次流；订阅随即移除
+          // 消息末尾注入实时身体状态快照（记忆入档仍用原始文本）
           agent
-            .prompt(message)
+            .prompt(buildUserPrompt(message, snapshot.env))
             .catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);
               send('error', { error: `agent_error: ${msg}` });
@@ -336,11 +398,30 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     await run;
     if (closed) return;
     const model = await resolveModel();
+    const reply = extractReply(agent);
+    const commands = pendingCommands.splice(0);
+    // 诊断：流内失败（如 provider 报错）会记在 state.errorMessage，prompt() 不抛错
+    const runError = (agent.state as { errorMessage?: string }).errorMessage ?? null;
+    if (runError) console.error('[pi-agent] run errorMessage:', runError);
+    // 情景记忆：Pi 本轮真正说出的话、身体动作、场景事件入档（供 idle 整理提炼长期记忆）
+    recordEpisode('agent_reply', streamedText.trim());
+    // 对话中 Agent 可能读写过记忆文件 → 刷新 system prompt 中的记忆索引
+    refreshSystemPrompt(agent);
+    for (const cmd of commands) {
+      if (cmd.type === 'command' && cmd.motion !== 'reply') {
+        recordEpisode('agent_action', `我做了动作 ${cmd.motion}${cmd.expression ? `（表情 ${cmd.expression}）` : ''}`, [
+          cmd.expression ? `${cmd.motion}(${cmd.expression})` : cmd.motion,
+        ]);
+      } else if (cmd.type === 'trigger_event') {
+        recordEpisode('scene_event', `我设想了情景 ${cmd.name}`);
+      }
+    }
     sseSend(res, 'done', {
-      reply: extractReply(agent),
-      commands: pendingCommands.splice(0),
+      reply,
+      commands,
       tools: [...toolTrace],
       model: model ? `${model.provider}/${model.id}` : '',
+      error: runError,
     });
     res.end();
   } catch (err) {
@@ -364,6 +445,86 @@ async function handleHealth(_req: IncomingMessage, res: ServerResponse): Promise
   return json(res, 200, { ok: true, model: `${m.provider}/${m.id}` });
 }
 
+/* ---------------- P3 idle 整理：Agent 经记忆工具自主整理（非写死流程） ---------------- */
+
+/**
+ * 整理时刻的内心活动。外循环（Jev consolidate 动作）发起，主 Agent 自己决定
+ * 怎么整理：读情景流水 → 对照现有记忆 → 增量写入记忆文件。服务端不做任何
+ * 写死的提炼/合并/游标推进，只提供存储与索引。
+ */
+const CONSOLIDATE_THOUGHT = `【独处整理时刻】这是你自己的内心活动，不是用户发言——外循环看你闲下来了，你决定趁现在整理记忆：
+1. 先 read_recent_episodes 回顾最近的经历，再 read_memory 翻看现有记忆文件，避免重复记录；
+2. 把值得长期记住的增量内容用 write_memory 写入合适的记忆文件（文件如何组织由你决定）；
+3. 没有值得记的就不用写，如实说明没有新东西。
+最后用一两句话（第一人称）说说你这次记住了什么。`;
+
+async function handleConsolidate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
+  try {
+    const agent = await getAgent();
+    if (!agent) return json(res, 503, { error: '未配置大模型 API Key：请在 .env 设置 LLM_API_KEY' });
+    await readBody(req); // 无需参数：读多少情景、怎么整理由 Agent 经工具自主决定
+
+    const runTools: Array<{ tool: string; args?: unknown }> = [];
+    let streamed = '';
+    let commandsStart = 0;
+
+    // 串行化：与对话请求互斥（同一时刻 Agent 只做一件事）
+    const run = chain.then(
+      () =>
+        new Promise<void>((resolveRun) => {
+          streamed = '';
+          commandsStart = pendingCommands.length;
+          const unsubscribe = agent.subscribe((event) => {
+            if (event.type === 'message_update') {
+              const ame = event.assistantMessageEvent as { type?: string; delta?: string };
+              if (ame?.type === 'text_delta' && ame.delta) streamed += ame.delta;
+              return;
+            }
+            if (event.type === 'tool_execution_start') {
+              const ev = event as unknown as { toolName?: string; args?: unknown };
+              runTools.push({ tool: ev.toolName ?? 'unknown', args: ev.args });
+              return;
+            }
+            if (event.type === 'agent_end') {
+              resolveRun();
+            }
+          });
+          agent
+            .prompt(CONSOLIDATE_THOUGHT)
+            .catch((err) => {
+              console.error('[pi-agent] consolidate prompt error:', err instanceof Error ? err.message : err);
+              resolveRun();
+            })
+            .finally(() => unsubscribe());
+        }),
+    );
+    chain = run.catch(() => undefined); // 防断链
+    await run;
+
+    // Agent 整理中可能顺带 command_robot（如思考的姿态），交还浏览器执行
+    const commands = pendingCommands.splice(commandsStart);
+    const summary = streamed.trim();
+    if (summary) recordEpisode('consolidate', summary);
+    // Agent 刚读写过记忆文件 → 刷新 system prompt 中的记忆索引（下一轮生效）
+    refreshSystemPrompt(agent);
+    console.log(`[pi-agent] 记忆整理(自主)完成: ${summary.slice(0, 60) || '无输出'}`);
+    return json(res, 200, { summary: summary || '这次没有要补记的内容', commands, tools: runTools });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[pi-agent] consolidate error:', msg);
+    return json(res, 500, { error: `consolidate_error: ${msg}` });
+  }
+}
+
+/** 记忆查看（调试）：记忆索引 + 最近情景 */
+function handleMemory(_req: IncomingMessage, res: ServerResponse): void {
+  return json(res, 200, {
+    memoryIndex: listMemoryIndex(),
+    episodes: listEpisodes(20).slice().reverse(),
+  });
+}
+
 /** Vite 插件：挂载 /api/agent/* 中间件 */
 export function piAgentPlugin(): Plugin {
   return {
@@ -371,6 +532,12 @@ export function piAgentPlugin(): Plugin {
     configureServer(server) {
       server.middlewares.use('/api/agent/health', (req, res) => {
         void handleHealth(req, res);
+      });
+      server.middlewares.use('/api/agent/consolidate', (req, res) => {
+        void handleConsolidate(req, res);
+      });
+      server.middlewares.use('/api/agent/memory', (req, res) => {
+        handleMemory(req, res);
       });
       server.middlewares.use('/api/agent/chat', (req, res) => {
         void handleChat(req, res);

@@ -16,6 +16,8 @@ export interface ChatPanelOptions {
   decideMessage: (env: EnvState, message: string) => Promise<MessageResponseDecision>;
   /** 感知入环：对话中的刺激事件写入感知循环 */
   perceive: (evt: PerceptionEvent) => void;
+  /** P3 整理记忆：消息路由选中 consolidate 时触发（返回整理摘要或 null） */
+  consolidate: () => Promise<string | null>;
 }
 
 interface ChatMessageEl {
@@ -101,6 +103,12 @@ export class ChatPanel {
     return lines.join('\n');
   }
 
+  /** 整理记忆等系统注记：以机器人自言自语的气泡呈现（💭） */
+  appendNote(text: string): void {
+    this._append('assistant', text);
+    this.body.scrollTop = this.body.scrollHeight;
+  }
+
   private async send(text: string): Promise<void> {
     this.busy = true;
     this._append('user', text);
@@ -117,12 +125,15 @@ export class ChatPanel {
       route = null; // 决策不可用 → 默认走慢思考，保证对话不中断
     }
 
-    // ② 并行执行：触发的身体动作立即做（取最高分），触发 reply 则同时唤醒慢思考
+    // ② 并行执行：触发的身体动作立即做（取最高分），触发 reply 则同时唤醒慢思考，
+    //    触发 consolidate 则在独处路径上整理记忆（与说话互斥：要说话就不整理）
     let bodyMotion: string | null = null;
     let wantsReply = false;
+    let wantsConsolidate = false;
     if (route) {
-      const body = route.triggered.filter((m) => m !== 'reply');
+      const body = route.triggered.filter((m) => m !== 'reply' && m !== 'consolidate');
       wantsReply = route.triggered.includes('reply');
+      wantsConsolidate = route.triggered.includes('consolidate') && !wantsReply;
       if (body.length) {
         bodyMotion = body[0]; // triggered 已按分数降序
         this.opts.applyCommand({
@@ -141,15 +152,18 @@ export class ChatPanel {
 
     const executed: string[] = [];
     if (bodyMotion) executed.push(MOTION_LABEL[bodyMotion] || bodyMotion);
+    if (wantsConsolidate) executed.push('整理记忆');
     if (wantsReply) executed.push('唤醒慢思考');
 
     // ③a 纯快反射：没有任何说话需求，不调用 LLM
-    if (route && !wantsReply && bodyMotion) {
+    if (route && !wantsReply && (bodyMotion || wantsConsolidate)) {
       pending.bubble.textContent = `（Jev 快反射 · ${executed.join(' + ')}）`;
       const t = document.createElement('div');
       t.className = 'chat-trace';
       t.textContent = this._routeTrace(route, executed);
       pending.root.appendChild(t);
+      // 整理记忆：服务端提炼长期记忆，结果经 appendNote 以 💭 气泡展示
+      if (wantsConsolidate) void this.opts.consolidate();
       this.busy = false;
       this.body.scrollTop = this.body.scrollHeight;
       return;

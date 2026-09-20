@@ -7,7 +7,7 @@
  * 因此上层控制逻辑与引擎实现完全解耦。
  */
 
-export type Motion = 'idle' | 'walk' | 'wave' | 'dance' | 'point' | 'shrug' | 'march' | 'reply';
+export type Motion = 'idle' | 'walk' | 'wave' | 'dance' | 'point' | 'shrug' | 'march' | 'reply' | 'consolidate';
 export type Expression = 'neutral' | 'happy' | 'sad' | 'surprised' | 'angry';
 
 /** 当前行为状态：机器人此刻正在做什么（一切行为统一回流外层循环的载体） */
@@ -32,6 +32,9 @@ export interface EnvState {
   socialDrive: number; // 0..1 社交驱动（对话热度），用户消息抬升、随时间衰减
   recentInteraction: string; // 最近交互摘要（用户说了什么/我刚做了什么），供决策理解上下文
   memoryDirty: boolean; // 有未整理的新记忆（P3 idle 整理用）
+  /* ---- P2 工作记忆：最近对话轮次摘要（热，分钟级）+ 整理游标 ---- */
+  recentDialogue: string[]; // 最近 3 轮对话（"user: ..."/"me: ..."，旧→新，最多 6 条）
+  lastConsolidatedAt: number | null; // 上次记忆整理时间戳（防抖：60s 内不再整理）
   /* ---- 行为状态回环：外层决策/内层快反射/慢思考指令的动作统一回流 ---- */
   currentAction: CurrentAction | null; // 此刻正在做的动作
   recentActions: string[]; // 最近动作历史（新在前，最多 5 条，如 "dance(pi)"）
@@ -140,7 +143,7 @@ export interface MessageResponseDecision {
 /** 动作触发阈值：score ≥ 0.5 即执行 */
 export const MESSAGE_TRIGGER_THRESHOLD = 0.5;
 
-export const MOTIONS: Motion[] = ['idle', 'walk', 'wave', 'dance', 'point', 'shrug', 'march', 'reply'];
+export const MOTIONS: Motion[] = ['idle', 'walk', 'wave', 'dance', 'point', 'shrug', 'march', 'reply', 'consolidate'];
 export const EXPRESSIONS: Expression[] = ['neutral', 'happy', 'sad', 'surprised', 'angry'];
 
 export const MOTION_LABEL: Record<string, string> = {
@@ -152,6 +155,7 @@ export const MOTION_LABEL: Record<string, string> = {
   shrug: '耸肩 SHRUG',
   march: '踏步 MARCH',
   reply: '回复 REPLY',
+  consolidate: '整理 CONSOLIDATE',
 };
 
 export const EXPRESSION_LABEL: Record<string, string> = {
@@ -172,6 +176,7 @@ const MESSAGE_MOTION_DESC: Record<Motion, string> = {
   shrug: 'shrug — uncertain, indifferent, no way to help',
   march: 'march in place — energize, keep cadence, drilling',
   idle: 'stay idle — stop, rest, stand still',
+  consolidate: 'pause and consolidate memory — reflect on what just happened and store what matters (user asks to remember something, take a break, think back)',
 };
 
 /**
@@ -260,6 +265,10 @@ export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQ
     point: 'Give directions by pointing toward an object or location.',
     shrug: 'Uncertain or no clear way to help; shrug shoulders.',
     march: 'Energize or keep cadence; step in place with higher energy.',
+    consolidate:
+      'Nothing urgent and new memories are unorganized; pause to reflect and consolidate recent interactions into long-term memory.'
+      + (ctx.memoryDirty ? '' : ' (Memory is already tidy — low priority.)')
+      + (consolidateDebounceHint(ctx) ? ` (${consolidateDebounceHint(ctx)})` : ''),
   };
   // 行为回环：外层决策知道"我此刻在做什么、做了多久"，避免无脑打断内层行为
   const act = ctx.currentAction;
@@ -302,8 +311,15 @@ export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQ
   };
 }
 
+/** 距上次整理不足 60s → 附带「刚整理过」语境，分数自然走低（防抖） */
+function consolidateDebounceHint(ctx: Partial<EnvState>): string {
+  if (!ctx.lastConsolidatedAt) return '';
+  const elapsed = Date.now() - ctx.lastConsolidatedAt;
+  return elapsed < 60_000 ? 'Just consolidated recently; do not repeat.' : '';
+}
+
 /**
- * 组装发送给引擎的 state（感知观测 + 内部状态 + 行为状态）。
+ * 组装发送给引擎的 state（感知观测 + 内部状态 + 行为状态 + 工作记忆）。
  * @param env 模拟环境信号 {intent, userProximity, obstacleAhead, energy, currentAction...}
  */
 export function buildState(env: EnvState) {
@@ -319,6 +335,11 @@ export function buildState(env: EnvState) {
     socialDrive: +(env.socialDrive ?? 0).toFixed(2),
     recentInteraction: env.recentInteraction ?? '',
     memoryDirty: !!env.memoryDirty,
+    /* 工作记忆：最近对话轮次摘要 + 整理游标（Jev 由此知道"刚才聊过什么"） */
+    recentDialogue: env.recentDialogue ?? [],
+    lastConsolidatedSec: env.lastConsolidatedAt
+      ? Math.round((Date.now() - env.lastConsolidatedAt) / 1000)
+      : null,
     /* 行为状态：外层决策能看到"我此刻在做什么、做了多久、谁发起的" */
     currentMotion: act?.motion ?? null,
     currentExpression: act?.expression ?? null,
