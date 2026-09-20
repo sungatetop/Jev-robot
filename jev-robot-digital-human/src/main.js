@@ -6,9 +6,7 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { HumanAvatar } from './avatar/human-avatar.js';
 import { GltfAvatar } from './avatar/gltf-avatar.js';
-import { Avatar25D } from './avatar/avatar-25d.js';
 import { createEngine } from './jev/decision-engine.js';
 import { Simulation } from './loop.js';
 import { Panel } from './ui/panel.js';
@@ -67,10 +65,8 @@ panel.cbOnAvatarMode = (mode) => setAvatarMode(mode);
 
 /* ---------- 数字人模式切换 ---------- */
 const AVATAR_CONFIG = {
-  procedural: { label: '程序化骨骼(THREE.Bone+蒙皮)', scale: 1 },
-  robot:      { label: '真实模型 · RobotExpressive (GLB)', url: '/models/RobotExpressive.glb', scale: 1.4 },
-  xbot:       { label: '真实模型 · Xbot (GLB)', url: '/models/Xbot.glb', scale: 1.0 },
-  '25d':      { label: '2.5D 分层 billboard', scale: 1.8 },
+  robot: { label: '真实模型 · RobotExpressive (GLB)', url: '/models/RobotExpressive.glb', height: 1.8 },
+  xbot:  { label: '真实模型 · Xbot (GLB)', url: '/models/Xbot.glb', height: 1.8 },
 };
 
 let scene3D = null;
@@ -84,17 +80,8 @@ function setAvatarInfo(mode) {
 
 /** 创建指定模式的数字人（GLTF 为异步加载） */
 function createAvatar(mode) {
-  const cfg = AVATAR_CONFIG[mode] || AVATAR_CONFIG.procedural;
-  if (mode === 'robot' || mode === 'xbot') {
-    return new GltfAvatar(cfg.url, { scale: cfg.scale, showSkeleton: skeletonVisible });
-  }
-  if (mode === '25d') {
-    const a = new Avatar25D({ scale: cfg.scale });
-    if (camera3D) a.setCamera(camera3D);
-    return a;
-  }
-  const a = new HumanAvatar({ showSkeleton: skeletonVisible });
-  return a;
+  const cfg = AVATAR_CONFIG[mode] || AVATAR_CONFIG.robot;
+  return new GltfAvatar(cfg.url, { height: cfg.height, showSkeleton: skeletonVisible });
 }
 
 /** 切换数字人模式：销毁旧实例，创建新实例并接入场景 */
@@ -178,8 +165,8 @@ function init3D() {
   grid.position.y = 0.01;
   scene3D.add(grid);
 
-  // 默认程序化骨骼数字人
-  setAvatarMode('procedural');
+  // 默认真实模型数字人
+  setAvatarMode('robot');
 
   const clock = new THREE.Clock();
   function resize() {
@@ -196,10 +183,7 @@ function init3D() {
       const dt = Math.min(clock.getDelta(), 0.05);
       controls.update();
       const av = avatarRef.current;
-      if (av) {
-        if (av.setCamera) av.setCamera(camera3D); // 2.5D billboard 用
-        av.update(dt, clock.elapsedTime);
-      }
+      if (av) av.update(dt, clock.elapsedTime);
       renderer.render(scene3D, camera3D);
     });
 

@@ -31,10 +31,10 @@ const EXPRESSION_MORPHS = {
 };
 
 export class GltfAvatar extends THREE.Group {
-  constructor(url, { scale = 1, showSkeleton = false } = {}) {
+  constructor(url, { height = 1.8, showSkeleton = false } = {}) {
     super();
     this.url = url;
-    this.scaleFactor = scale;
+    this.targetHeight = height;
     this.mixer = null;
     this.clips = [];          // AnimationClip[]
     this.actions = {};        // name -> AnimationAction
@@ -62,7 +62,17 @@ export class GltfAvatar extends THREE.Group {
     const gltf = await loader.loadAsync(this.url);
 
     this.model = gltf.scene;
-    this.model.scale.setScalar(this.scaleFactor);
+
+    // 归一化尺寸：GLB 各模型原生单位差异巨大（RobotExpressive≈4.8，Xbot≈1.8），
+    // 按包围盒统一缩放到目标身高，并把脚底对齐地面 y=0
+    const box = new THREE.Box3().setFromObject(this.model);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    if (size.y > 1e-4) {
+      const s = this.targetHeight / size.y;
+      this.model.scale.setScalar(s);
+      this.model.position.y = -box.min.y * s;
+    }
     this.model.traverse((o) => {
       if (o.isMesh) {
         o.castShadow = true;

@@ -98,7 +98,8 @@ export class Avatar25D extends THREE.Group {
     this.handR.position.set(0.62, -0.72, 0.08);
     this.add(this.handR);
 
-    this.layers = [this.shadow, this.hairBack, this.torso, this.armL, this.armR,
+    // billboard 图层列表（注意：不能叫 this.layers，会覆盖 Object3D.layers 导致渲染器报错）
+    this.billboardLayers = [this.shadow, this.hairBack, this.torso, this.armL, this.armR,
       this.head, this.hairFront, this.handL, this.handR];
   }
 
@@ -240,7 +241,7 @@ export class Avatar25D extends THREE.Group {
     // billboard：所有层朝向相机
     const cam = this._camera;
     if (cam) {
-      for (const layer of this.layers) {
+      for (const layer of this.billboardLayers) {
         layer.lookAt(cam.position);
       }
     }
