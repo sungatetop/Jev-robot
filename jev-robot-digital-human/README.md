@@ -53,6 +53,8 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 ## 架构
 
+> 配套示意图：[architecture-diagram.html](./docs/architecture-diagram.html)（浏览器打开，矢量可缩放）· [architecture-diagram.png](./docs/architecture-diagram.png)
+
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  对话层  ui/chat.ts + index.html（右侧面板主交互区）           │
