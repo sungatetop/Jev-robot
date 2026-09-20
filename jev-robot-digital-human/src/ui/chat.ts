@@ -5,7 +5,7 @@
  * commands 由外部回调应用到 Simulation/Avatar。
  */
 import { MOTION_LABEL } from '../jev/semantics.js';
-import type { AgentCommand, EnvState, DecisionPayload, RobotDecision } from '../jev/types.js';
+import type { AgentCommand, EnvState, DecisionPayload, MessageResponseDecision } from '../jev/types.js';
 
 interface AgentChatResponse {
   reply?: string;
@@ -19,8 +19,8 @@ export interface ChatPanelOptions {
   getEnv: () => EnvState;
   getLastDecision: () => DecisionPayload | null;
   applyCommand: (cmd: AgentCommand) => void;
-  /** Jev 消息响应决策：「回复(慢思考)」与直接身体动作同台竞争，选中谁执行谁 */
-  decideMessage: (env: EnvState, message: string) => Promise<RobotDecision>;
+  /** Jev 消息响应决策：各动作（含 reply）并行打分，阈值以上同时执行 */
+  decideMessage: (env: EnvState, message: string) => Promise<MessageResponseDecision>;
 }
 
 interface ChatMessageEl {
@@ -96,19 +96,18 @@ export class ChatPanel {
     return tools.map((t) => `🔧 ${t.tool} ${JSON.stringify(t.args ?? {})}`).join('\n');
   }
 
-  private _routeTrace(route: RobotDecision, toSlowThinking: boolean): string {
-    const label = MOTION_LABEL[route.motion] || route.motion;
-    const conf = route.confidence != null ? ` (${(route.confidence * 100).toFixed(0)}%)` : '';
+  /** 路由 trace：并行打分一览 + 执行计划 */
+  private _routeTrace(route: MessageResponseDecision, executed: string[]): string {
     const engine = route.engine === 'jev' ? '真实 Jev' : '本地 Jev';
-    const lines = [`🧭 ${engine} 响应决策: ${label}${conf}`];
-    if (route.probabilities) {
-      const top = Object.entries(route.probabilities)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 3)
-        .map(([k, v]) => `${(MOTION_LABEL[k] || k).split(' ')[0]} ${(v * 100).toFixed(0)}%`);
-      lines.push(`概率: ${top.join(' / ')}`);
-    }
-    lines.push(toSlowThinking ? '→ 唤醒慢思考（Pi）' : '→ 快反射直接执行，未唤醒慢思考');
+    const lines = [`🧭 ${engine} 响应决策（并行打分）:`];
+    lines.push(
+      route.actions
+        .map((a) => `${(MOTION_LABEL[a.motion] || a.motion).split(' ')[0]} ${(a.score * 100).toFixed(0)}%${a.trigger ? '✓' : ''}`)
+        .join(' · '),
+    );
+    if (executed.length) lines.push(`→ 执行: ${executed.join(' + ')}`);
+    else lines.push('→ 执行: (无)');
+    if (route.warning) lines.push(`⚠ ${route.warning}`);
     return lines.join('\n');
   }
 
@@ -116,41 +115,57 @@ export class ChatPanel {
     this.busy = true;
     this._append('user', text);
 
-    // ① Jev 消息响应决策：「回复(说话)」与身体动作同台竞争
+    // ① Jev 消息响应决策：各动作（含 reply）并行打分，阈值以上同时执行
     const pending = this._append('assistant', 'Jev 感知中…');
     this.body.scrollTop = this.body.scrollHeight;
-    let route: RobotDecision | null = null;
+    let route: MessageResponseDecision | null = null;
     try {
       route = await this.opts.decideMessage(this.opts.getEnv(), text);
     } catch {
       route = null; // 决策不可用 → 默认走慢思考，保证对话不中断
     }
 
-    // ② 快反射：Jev 选中身体动作 → 直接执行，不调用 LLM
-    if (route && route.motion !== 'reply') {
-      const label = MOTION_LABEL[route.motion] || route.motion;
-      pending.bubble.textContent = `（Jev 快反射 · ${label}）`;
+    // ② 并行执行：触发的身体动作立即做（取最高分），触发 reply 则同时唤醒慢思考
+    let bodyMotion: string | null = null;
+    let wantsReply = false;
+    if (route) {
+      const body = route.triggered.filter((m) => m !== 'reply');
+      wantsReply = route.triggered.includes('reply');
+      if (body.length) {
+        bodyMotion = body[0]; // triggered 已按分数降序
+        this.opts.applyCommand({
+          type: 'command',
+          motion: bodyMotion,
+          expression: route.expression,
+          intensity: route.intensity,
+          lookAtUser: route.lookAtUser,
+          engine: route.engine,
+        });
+      }
+    } else {
+      wantsReply = true;
+    }
+
+    const executed: string[] = [];
+    if (bodyMotion) executed.push(MOTION_LABEL[bodyMotion] || bodyMotion);
+    if (wantsReply) executed.push('唤醒慢思考');
+
+    // ③a 纯快反射：没有任何说话需求，不调用 LLM
+    if (route && !wantsReply && bodyMotion) {
+      pending.bubble.textContent = `（Jev 快反射 · ${executed.join(' + ')}）`;
       const t = document.createElement('div');
       t.className = 'chat-trace';
-      t.textContent = this._routeTrace(route, false);
+      t.textContent = this._routeTrace(route, executed);
       pending.root.appendChild(t);
-      this.opts.applyCommand({
-        type: 'command',
-        motion: route.motion,
-        expression: route.expression,
-        intensity: route.intensity,
-        lookAtUser: route.lookAtUser,
-        engine: route.engine,
-      });
       this.busy = false;
       this.body.scrollTop = this.body.scrollHeight;
       return;
     }
 
-    // ③ 慢思考：Jev 选中「回复」→ 唤醒 Pi Agent
-    pending.bubble.textContent = '思考中…';
+    // ③b 唤醒慢思考：Pi Agent 生成语言回复（动作已并行执行）
+    pending.bubble.textContent = bodyMotion ? '边做动作边想…' : '思考中…';
     const routeLine = route
-      ? this._routeTrace(route, true) + '\n'
+      ? this._routeTrace(route, executed) + '\n'
       : '🧭 Jev 响应决策不可用 → 默认唤醒慢思考\n';
     try {
       const res = await fetch('/api/agent/chat', {

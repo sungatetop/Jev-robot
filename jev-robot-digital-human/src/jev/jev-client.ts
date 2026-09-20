@@ -6,8 +6,8 @@
  * 响应结构与官方文档一致：{ model, answers, usage }。
  */
 
-import { normalizeDecision, buildQuestions, buildState } from './semantics.js';
-import type { EnvState, RobotDecision, JevAnswers } from './semantics.js';
+import { normalizeDecision, normalizeMessageDecision, buildQuestions, buildMessageQuestions, buildState } from './semantics.js';
+import type { EnvState, RobotDecision, JevAnswers, MessageResponseDecision } from './semantics.js';
 
 export const DEFAULT_FALLBACK: RobotDecision = {
   motion: 'idle', expression: 'neutral', intensity: 1, lookAtUser: false,
@@ -64,17 +64,21 @@ export async function decideWithRealJev(env: EnvState, opts?: CallOptions): Prom
 }
 
 /**
- * 用户消息响应决策：把「回复（说话）」与身体动作一起交给 Jev 选择。
- * 选中 reply → 上层转交慢思考（Pi）；选中其它动作 → 直接执行，不唤醒 LLM。
+ * 用户消息响应决策：每个动作（含 reply「说话」）独立 noul 打分，
+ * 阈值以上同时执行（如边挥手边回复）。失败抛错由上层回退本地。
  */
 export async function decideMessageWithRealJev(
   env: EnvState,
   message: string,
   opts?: CallOptions,
-): Promise<RobotDecision> {
-  const questions = buildQuestions(env, { allowReply: true, userMessage: message });
+): Promise<MessageResponseDecision> {
+  const questions = buildMessageQuestions(env, message);
   const state = { ...buildState(env), userMessage: message };
   const raw = await callJev(state, questions, opts);
   if (!raw || !raw.answers) throw new Error('Empty answers from TypeSafe API');
-  return normalizeDecision(raw.answers, DEFAULT_FALLBACK);
+  return normalizeMessageDecision(raw.answers as JevAnswers, {
+    expression: 'happy',
+    intensity: 1,
+    lookAtUser: true,
+  });
 }

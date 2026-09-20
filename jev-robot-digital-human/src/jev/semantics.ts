@@ -92,7 +92,36 @@ export interface JevAnswers {
   expression?: ChoiceAnswer;
   intensity?: ScoreAnswer;
   lookAtUser?: NoulAnswer;
+  [key: string]: ChoiceAnswer | ScoreAnswer | NoulAnswer | undefined;
 }
+
+/* ---------- 消息响应决策：动作并行打分，可同时执行 ---------- */
+
+/** 单个动作的执行倾向分（0..1）与是否触发 */
+export interface MessageActionScore {
+  motion: Motion;
+  score: number;
+  trigger: boolean;
+}
+
+/**
+ * 用户消息的响应决策：对每个动作（含 reply「说话」）独立打分，
+ * 阈值以上的动作同时执行 —— 例如边挥手边回复。
+ */
+export interface MessageResponseDecision {
+  /** 全部动作打分（按分数降序） */
+  actions: MessageActionScore[];
+  /** 触发的动作（score ≥ 阈值，降序；含 reply 表示要说话） */
+  triggered: Motion[];
+  expression: string;
+  intensity: number;
+  lookAtUser: boolean;
+  engine?: string;
+  warning?: string;
+}
+
+/** 动作触发阈值：score ≥ 0.5 即执行 */
+export const MESSAGE_TRIGGER_THRESHOLD = 0.5;
 
 export const MOTIONS: Motion[] = ['idle', 'walk', 'wave', 'dance', 'point', 'shrug', 'march', 'reply'];
 export const EXPRESSIONS: Expression[] = ['neutral', 'happy', 'sad', 'surprised', 'angry'];
@@ -116,19 +145,91 @@ export const EXPRESSION_LABEL: Record<string, string> = {
   angry: '生气 ANGRY',
 };
 
+/** 动作描述：消息响应决策中每个动作的独立评分依据 */
+const MESSAGE_MOTION_DESC: Record<Motion, string> = {
+  reply: 'answer verbally — needs language, thought, explanation, planning, or conversation',
+  wave: 'wave the hand — greeting, welcoming, saying hi or goodbye',
+  dance: 'dance — celebration, party, burst of joy',
+  walk: 'walk — move forward, approach, or step closer',
+  point: 'point — give directions or indicate an object',
+  shrug: 'shrug — uncertain, indifferent, no way to help',
+  march: 'march in place — energize, keep cadence, drilling',
+  idle: 'stay idle — stop, rest, stand still',
+};
+
 /**
- * 构造发给 Jev 的问题集。criteria 里的文字会给模型足够语义。
- * @param ctx 上下文（如距障碍/用户距离、能量），可用于条件化 criteria
- * @param opts.allowReply 把「回复（说话）」纳入动作选项——用于用户消息响应决策；
- *        常规感知循环没有可回复的对象，不提供该选项
- * @param opts.userMessage 用户刚说的话，注入 instructions 帮助语义判断
+ * 构造「消息响应决策」问题集：每个动作（含 reply）一个独立 noul 问题，
+ * 各自打分互不排斥 —— 阈值以上的动作同时执行；另附表情/强度/朝向问题。
  */
-export function buildQuestions(
-  ctx: Partial<EnvState> = {},
-  opts: { allowReply?: boolean; userMessage?: string } = {},
+export function buildMessageQuestions(
+  env: EnvState,
+  message: string,
 ): Record<string, JevQuestion> {
+  const base = buildQuestions(env);
+  const msg = (message || '').trim();
+  const questions: Record<string, JevQuestion> = {
+    expression: base.expression!,
+    intensity: base.intensity!,
+    lookAtUser: base.lookAtUser!,
+  };
+  for (const m of MOTIONS) {
+    questions[m] = {
+      type: 'noul',
+      instructions:
+        `The user just said to the robot: "${msg}". `
+        + `Rate INDEPENDENTLY whether the robot should ${MESSAGE_MOTION_DESC[m]} `
+        + '(0 = definitely not, 1 = definitely yes). '
+        + 'Multiple actions can be true simultaneously — e.g. answer verbally while waving.',
+      criteria: { false: 'No, should not do this.', true: 'Yes, should do this.' },
+    };
+  }
+  return questions;
+}
+
+/**
+ * 解析「消息响应决策」答案：每个动作 noul → 0..1 分，
+ * ≥ 阈值触发；无触发时兜底最高分动作（过低则强制 reply，宁可说话）。
+ */
+export function normalizeMessageDecision(
+  answers: JevAnswers | null,
+  fallback: { expression: string; intensity: number; lookAtUser: boolean },
+): MessageResponseDecision {
+  const clamp01 = (v: unknown) => Math.max(0, Math.min(1, Number(v) || 0));
+  const actions: MessageActionScore[] = MOTIONS.map((motion) => {
+    const a = answers?.[motion];
+    let score = 0;
+    if (a?.type === 'noul') score = clamp01(a.noul);
+    else if (a?.type === 'score') score = clamp01(a.score / 2);
+    else if (a?.type === 'choice') score = clamp01(a.confidence);
+    return { motion, score, trigger: score >= MESSAGE_TRIGGER_THRESHOLD };
+  });
+  if (!actions.some((a) => a.trigger)) {
+    const best = [...actions].sort((a, b) => b.score - a.score)[0];
+    if (best && best.score >= 0.25) best.trigger = true;
+    else {
+      const reply = actions.find((a) => a.motion === 'reply')!;
+      reply.score = Math.max(reply.score, 0.6);
+      reply.trigger = true;
+    }
+  }
+  const exprRaw = answers?.expression?.type === 'choice' ? answers.expression.choice : fallback.expression;
+  const intensityRaw = answers?.intensity?.type === 'score' ? Number(answers.intensity.score) : fallback.intensity;
+  const look = answers?.lookAtUser?.type === 'noul' ? answers.lookAtUser.noul > 0.6 : fallback.lookAtUser;
+  return {
+    actions: [...actions].sort((a, b) => b.score - a.score),
+    triggered: [...actions].filter((a) => a.trigger).sort((a, b) => b.score - a.score).map((a) => a.motion),
+    expression: EXPRESSIONS.includes(exprRaw as Expression) ? exprRaw : fallback.expression,
+    intensity: Math.max(0, Math.min(2, intensityRaw)),
+    lookAtUser: look,
+  };
+}
+
+/**
+ * 构造发给 Jev 的问题集（常规感知循环；动作集不含 reply——循环里没有消息可回）。
+ * @param ctx 上下文（如距障碍/用户距离、能量），可用于条件化 criteria
+ */
+export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQuestion> {
   const nearUser = (ctx.userProximity ?? 1) < 0.5;
-  const msg = (opts.userMessage || '').trim();
   const actionOptions: Record<string, string> = {
     idle: 'Mission idle; relax and stand still with neutral posture.',
     walk: 'User asked to move or a waypoint is ahead; pace forward calmly.',
@@ -138,21 +239,11 @@ export function buildQuestions(
     shrug: 'Uncertain or no clear way to help; shrug shoulders.',
     march: 'Energize or keep cadence; step in place with higher energy.',
   };
-  if (opts.allowReply) {
-    actionOptions.reply =
-      'The message needs language understanding, planning, or a verbal answer '
-      + '(questions, chats, requests about thoughts/plans, or anything a body motion cannot express); '
-      + 'respond by speaking — hand off to the slow-thinking system.';
-  }
-  const instructions = opts.allowReply
-    ? `The user just said to the robot: "${msg}". Decide how the robot should respond: `
-      + 'either a direct body motion (reflex, no words needed) or reply by speaking (slow thinking). '
-      + 'Which single action should it take?'
-    : 'Given the robot digital-human state, which single motion should it perform next?';
   return {
     action: {
       type: 'choice',
-      instructions,
+      instructions:
+        'Given the robot digital-human state, which single motion should it perform next?',
       criteria: actionOptions,
     },
     expression: {

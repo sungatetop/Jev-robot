@@ -96,13 +96,14 @@ npm run typecheck   # tsc --noEmit 类型校验
   → AnimationMixer crossfade 播放
 ```
 
-**消息响应路由（Jev 先行，「回复」也是动作）：**
+**消息响应决策（Jev 并行打分，「回复」也是动作）：**
 
 ```
 用户消息 → engine.decideMessage(env, message)
-  问题集把「回复(说话)」与身体动作(walk/wave/dance/...)同台竞争：
-  → 选中身体动作（如 wave 97%）→ 快反射直接执行，不调用 LLM
-  → 选中 reply → 唤醒 System Two 慢思考
+  每个动作（含 reply「说话」）独立 noul 打分，阈值(0.5)以上同时执行：
+  → 舞动 68%✓ + 回复 67%✓ → 边跳舞边唤醒 Pi 生成语言回复
+  → 仅动作触发（如舞动 98%）→ 快反射直接执行，零 LLM 调用
+  → 仅回复触发 → 纯慢思考对话
 ```
 
 **System Two（Pi 慢思考，服务端智能体）：**

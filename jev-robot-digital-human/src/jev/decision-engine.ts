@@ -11,8 +11,9 @@
  */
 
 import { decideWithRealJev, decideMessageWithRealJev } from './jev-client.js';
-import { normalizeDecision } from './semantics.js';
-import type { EnvState, RobotDecision, DecisionEngine } from './types.js';
+import { normalizeDecision, normalizeMessageDecision, MOTIONS, MESSAGE_TRIGGER_THRESHOLD } from './semantics.js';
+import type { DecisionEngine } from './types.js';
+import type { EnvState, RobotDecision, MessageResponseDecision } from './types.js';
 
 /** 本地规则引擎：把 env 状态映射为带概率/置信度的决策，结构对齐 Jev。 */
 export class LocalMockEngine implements DecisionEngine {
@@ -85,33 +86,41 @@ export class LocalMockEngine implements DecisionEngine {
   }
 
   /**
-   * 用户消息响应决策：关键词规则打分，「回复(说话)」与身体动作同台竞争。
-   * 问句/长句/复杂语义 → 倾向 reply（转慢思考）；明确动作词 → 直接执行动作。
+   * 用户消息响应决策（并行打分）：关键词规则给每个动作独立打 0..1 分，
+   * 阈值以上同时执行 —— 可边说话边做动作。
    */
-  async decideMessage(env: EnvState, message: string): Promise<RobotDecision> {
+  async decideMessage(env: EnvState, message: string): Promise<MessageResponseDecision> {
     const m = message.toLowerCase();
     const has = (re: RegExp) => re.test(m);
+    // 语言性语义（问句/长句/需要表达）→ 说话倾向高
+    const verbal =
+      has(/[?？]|为什么|怎么|什么|如何|介绍|讲|说说|聊|告诉我|你觉得|能不能|可以不|帮我|你是谁|你叫/)
+      || message.length > 18;
     const scores: Record<string, number> = {
-      reply: 3,
-      wave: has(/嗨|哈喽|你好|您好|hello|hi\b|欢迎|挥手|招手|打个招呼/) ? 7 : 0.4,
-      dance: has(/跳舞|舞|庆祝|dance|celebrat|嗨起来/) ? 7 : 0.4,
-      walk: has(/走|走两步|前进|移动|过来|walk|move/) ? 6 : 0.4,
-      point: has(/指|方向|哪里|哪边|where|指南/) ? 5 : 0.4,
-      march: has(/踏步|原地走|行军|march/) ? 7 : 0.3,
-      shrug: has(/不知道|说不上来|无所谓|随便你|shrug/) ? 5 : 0.3,
-      idle: has(/停|停下|站好|休息|别动|stop|停一下/) ? 6 : 0.8,
+      reply: verbal ? 0.92 : 0.3,
+      wave: has(/嗨|哈喽|你好|您好|hello|hi\b|欢迎|挥手|招手|打招呼/) ? 0.9 : 0.12,
+      dance: has(/跳舞|舞|庆祝|dance|celebrat|嗨起来/) ? 0.94 : 0.1,
+      walk: has(/走|走两步|前进|移动|过来|walk|move/) ? 0.85 : 0.1,
+      point: has(/指|方向|哪里|哪边|where|指南/) ? 0.8 : 0.08,
+      march: has(/踏步|原地走|行军|march/) ? 0.9 : 0.06,
+      shrug: has(/不知道|说不上来|无所谓|随便你|shrug/) ? 0.8 : 0.06,
+      idle: has(/停|停下|站好|休息|别动|stop|停一下/) ? 0.88 : 0.15,
     };
-    // 问句 / 长句 / 需要语言表达的语义 → 增强说话倾向
-    if (has(/[?？]|为什么|怎么|什么|如何|介绍|讲|说说|聊|告诉我|你觉得|能不能|可以不|帮我/) || message.length > 18) {
-      scores.reply += 4.5;
-    }
-    const answers = {
-      action: this.chooseFromScores(scores),
-      expression: this.chooseFromScores(this.scoreExpressions(env)),
-      intensity: this.scoreIntensity(env),
-      lookAtUser: this.lookAtUser(env),
+    const expr = this.chooseFromScores(this.scoreExpressions(env)).choice;
+    const intensity = this.scoreIntensity(env).score;
+    const lookAtUser = this.lookAtUser(env).noul > 0.6;
+    return {
+      actions: MOTIONS
+        .map((motion) => ({ motion, score: scores[motion] ?? 0, trigger: (scores[motion] ?? 0) >= MESSAGE_TRIGGER_THRESHOLD }))
+        .sort((a, b) => b.score - a.score),
+      triggered: MOTIONS
+        .filter((motion) => (scores[motion] ?? 0) >= MESSAGE_TRIGGER_THRESHOLD)
+        .sort((a, b) => (scores[b] ?? 0) - (scores[a] ?? 0)),
+      expression: expr,
+      intensity,
+      lookAtUser,
+      engine: 'local',
     };
-    return normalizeDecision(answers, { motion: 'reply', expression: 'neutral', intensity: 1, lookAtUser: true, confidence: 0, probabilities: null, raw: null });
   }
 }
 
@@ -146,8 +155,8 @@ export class RealJevEngine implements DecisionEngine {
     }
   }
 
-  /** 消息响应决策：真实 Jev（动作集含 reply），失败回退本地规则。 */
-  async decideMessage(env: EnvState, message: string): Promise<RobotDecision> {
+  /** 消息响应决策：真实 Jev 并行打分（含 reply），失败回退本地规则。 */
+  async decideMessage(env: EnvState, message: string): Promise<MessageResponseDecision> {
     try {
       const decision = await decideMessageWithRealJev(env, message);
       decision.engine = 'jev';
