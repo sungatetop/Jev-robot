@@ -10,7 +10,7 @@
 ## 功能特性
 
 - **双系统架构**：Jev 快思考（~3.2s 决策循环）+ Pi 慢思考（对话式规划，工具调用）
-- **可插拔决策引擎**：真实 Jev / 本地规则引擎，同一接口自动切换、失败自动回退
+- **真实 Jev 决策引擎**：全部决策走真实 TypeSafe Jev；感知循环失败用 `idle` 安全动作兜底，消息响应失败默认转交慢思考
 - **置信度门控**：决策置信度低于阈值时强制回退到安全的 `idle` 动作
 - **类型化决策 schema**：动作(choice) + 表情(choice) + 强度(score) + 朝向(noul)，输出概率分布与置信度
 - **Pi 智能体工具集**：`get_robot_state` / `set_robot_intent` / `command_robot` / `trigger_scene_event`，指令经浏览器侧安全应用
@@ -32,7 +32,7 @@ npm run dev        # http://localhost:5173
 环境配置（项目根目录 `.env`）：
 
 ```bash
-# System One：Jev 决策模型（不配置时自动走本地引擎）
+# System One：Jev 决策模型（.env 配置 TYPESAFE_API_KEY）
 TYPESAFE_API_KEY=your_key
 
 # System Two：Pi 智能体（默认 DeepSeek）
@@ -69,9 +69,8 @@ npm run typecheck   # tsc --noEmit 类型校验
 │  决策循环 → 置信度门控 → 安全回退 → 下发执行                     │
 ├──────────────────────────────────────────────────────────────┤
 │  决策层（System One · 浏览器侧）  jev/                          │
-│  decision-engine.ts   可插拔引擎 (auto / real / local)         │
-│    ├ RealJevEngine ── jev-client.ts (HTTP, 12s 超时)          │
-│    └ LocalMockEngine (规则打分 + softmax，离线兜底)              │
+│  decision-engine.ts   真实 Jev 引擎 (RealJevEngine)             │
+│    └ jev-client.ts (HTTP, 超时控制；失败上抛由调用方兜底)          │
 │  semantics.ts  统一 schema：questions / answers / 归一化        │
 ├──────────────────────────────────────────────────────────────┤
 │  代理层  vite.config.ts (jev-proxy + pi-agent 插件)            │
@@ -89,7 +88,7 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 ```
 场景事件 / 环境漂移 → env {intent, userProximity, obstacleAhead, energy}
-  → engine.decide(env)                     [真实 Jev 或本地规则]
+  → engine.decide(env)                     [真实 Jev，失败 idle 兜底]
   → 置信度门控 (confidence < gate → motion 强制 idle)
   → panel.setDecision()                    [概率条 / 置信度 / 历史]
   → avatar.setDecision({motion, expression, intensity})
@@ -142,7 +141,7 @@ npm run typecheck   # tsc --noEmit 类型校验
    - "欢迎一下我" → Pi 调用 `command_robot(wave, happy)` 直接执行
    - "跳个舞庆祝一下" → `command_robot(dance, happy)` + `trigger_scene_event(celebrate)`
    - "前方有障碍物怎么办" → `set_robot_intent(避障)`，后续 Jev 循环自主决策避让
-3. **参数设置**：点击右上角 `⚙ 参数设置` 打开弹窗——切换引擎（自动/真实 Jev/本地）、
+3. **参数设置**：点击右上角 `⚙ 参数设置` 打开弹窗——
    决策间隔（800–6000ms）、置信度门控阈值（0–0.95）、数字人类型、骨骼调试
 4. **决策 · 状态总览**：面板底部紧凑展示引擎/置信度/门控/朝向 + 动作概率条 +
    意图/距离/能量/障碍；`感知状态与决策历史` 可展开查看原始 JSON 与历史

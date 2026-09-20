@@ -3,7 +3,7 @@
  *
  *   while(running) {
  *     env = 读取感知状态(模拟环境)
- *     决策 = engine.decide(env)          // 本地规则 or 真实 Jev
+ *     决策 = engine.decide(env)          // 真实 Jev（失败 idle 兜底）
  *     若 决策.confidence < gate → 回退到安全动作 idle（置信度门控）
  *     下推给执行器(avatar.setDecision)
  *     等待 LOOP_MS，重复
@@ -115,8 +115,23 @@ export class Simulation {
     this.drift();
     const env = { ...this.env };
 
-    // 从引擎取决策（真实 Jev 或本地规则），结构已归一化
-    const decision = await this.engine.decide(env);
+    // 从引擎取决策；失败（网络/Key 问题）用 idle 安全动作兜底，循环不中断
+    let decision: RobotDecision;
+    try {
+      decision = await this.engine.decide(env);
+    } catch (err) {
+      decision = {
+        motion: 'idle',
+        expression: 'neutral',
+        intensity: 0,
+        lookAtUser: false,
+        confidence: 0,
+        probabilities: null,
+        raw: null,
+        engine: 'jev-fail',
+        warning: err instanceof Error ? err.message : String(err),
+      };
+    }
 
     // ===== 置信度门控：不够自信就回退到安全动作 =====
     const gated = decision.confidence != null && decision.confidence < this.gate;
@@ -136,7 +151,7 @@ export class Simulation {
       decision,
       applied,
       gated,
-      engine: decision.engine ?? 'local',
+      engine: decision.engine ?? 'jev',
       ts: Date.now(),
     };
     if (gated) this.onGated(payload);

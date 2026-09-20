@@ -9,7 +9,6 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GltfAvatar } from './avatar/gltf-avatar.js';
 import type { DecisionInput } from './avatar/gltf-avatar.js';
 import { createEngine } from './jev/decision-engine.js';
-import type { EngineKind } from './jev/decision-engine.js';
 import { Simulation } from './loop.js';
 import { Panel } from './ui/panel.js';
 import { ChatPanel } from './ui/chat.js';
@@ -51,11 +50,6 @@ const sim = new Simulation({
 
 panel.bind();
 panel.cbApply = (decision) => applyProxy.current(decision);
-panel.cbOnEngine = (mode) => {
-  currentEngine = createEngine(mode as EngineKind);
-  sim.engine = currentEngine;
-  panel.setEngineStatus({ engine: '', warning: '' });
-};
 panel.cbOnToggle = () => {
   if (sim.running) { sim.stop(); panel.setLoopRunning(false); }
   else { sim.start(); panel.setLoopRunning(true); }

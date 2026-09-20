@@ -98,7 +98,7 @@ export class ChatPanel {
 
   /** 路由 trace：并行打分一览 + 执行计划 */
   private _routeTrace(route: MessageResponseDecision, executed: string[]): string {
-    const engine = route.engine === 'jev' ? '真实 Jev' : '本地 Jev';
+    const engine = route.engine === 'jev' ? '真实 Jev' : 'Jev 决策';
     const lines = [`🧭 ${engine} 响应决策（并行打分）:`];
     lines.push(
       route.actions

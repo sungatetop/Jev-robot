@@ -16,7 +16,6 @@ export class Panel {
   history: DecisionPayload[] = [];
 
   cbApply?: (decision: RobotDecision) => void;
-  cbOnEngine?: (mode: string) => void;
   cbOnToggle?: () => void;
   cbOnLoopMs?: (ms: number) => void;
   cbOnGate?: (v: number) => void;
@@ -25,10 +24,6 @@ export class Panel {
   cbOnAvatarMode?: (mode: string) => void;
 
   bind(): void {
-    // 引擎选择（HTML 用 data-engine 属性，无独立 id）
-    document.querySelectorAll<HTMLButtonElement>('[data-engine]').forEach((b) =>
-      b.addEventListener('click', () => this._onEngine(b.dataset.engine!))
-    );
     // 循环开关
     $('btn-toggle').addEventListener('click', () => this._onToggle());
     // 参数设置弹窗
@@ -62,13 +57,6 @@ export class Panel {
     ($('settings-modal') as HTMLElement).hidden = !open;
   }
 
-  private _onEngine(mode: string): void {
-    document.querySelectorAll<HTMLButtonElement>('[data-engine]').forEach((b) =>
-      b.classList.toggle('active', b.dataset.engine === mode)
-    );
-    this.cbOnEngine?.(mode);
-  }
-
   private _onToggle(): void { this.cbOnToggle?.(); }
   private _onLoopMs(ms: number): void { this.cbOnLoopMs?.(ms); }
   private _onGate(v: number): void { this.cbOnGate?.(v); }
@@ -80,9 +68,9 @@ export class Panel {
 
   setEngineStatus({ engine, warning }: { engine: string; warning?: string | null; error?: string }): void {
     const el = $('engine-status');
-    el.textContent = engine === 'jev' ? '● 真实 Jev' : engine === 'local' ? '● 本地引擎(回退)' : '● 本地引擎';
+    el.textContent = engine === 'jev' ? '● 真实 Jev' : '● Jev 离线';
     el.className = engine === 'jev' ? 'badge ok' : 'badge warn';
-    $('engine-warn').textContent = warning ? '回退原因: ' + warning : '';
+    $('engine-warn').textContent = warning ? '离线原因: ' + warning : '';
   }
 
   setLoopRunning(running: boolean): void {
@@ -115,7 +103,7 @@ export class Panel {
       `${Math.max(0, Math.min(100, (a.intensity / 2) * 100))}%`;
 
     $('engine-emitter').textContent =
-      payload.engine === 'jev' ? '真实 Jev' : payload.engine === 'pi-agent' ? 'Pi 智能体' : '本地引擎';
+      payload.engine === 'jev' ? '真实 Jev' : payload.engine === 'pi-agent' ? 'Pi 智能体' : 'Jev 离线';
     $('confidence-num').textContent =
       d.confidence != null ? `置信 ${(d.confidence * 100).toFixed(0)}%` : '置信 --';
     const gate = $('conf-gate-num');
