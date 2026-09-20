@@ -125,7 +125,7 @@ const setIntentTool: AgentTool<any> = {
   }),
   execute: async (_id, params) => {
     const { intent, note } = params as { intent: string; note?: string };
-    pendingCommands.push({ type: 'set_intent', intent, note });
+    emitCommand({ type: 'set_intent', intent, note });
     return ok(`你的心意已定：${intent}，接下来身体会朝这个方向自主行动`);
   },
 };
@@ -142,7 +142,7 @@ const commandTool: AgentTool<any> = {
   }),
   execute: async (_id, params) => {
     const p = params as { motion: string; expression?: string; intensity?: number; look_at_user?: boolean };
-    pendingCommands.push({
+    emitCommand({
       type: 'command',
       motion: p.motion,
       expression: p.expression,
@@ -164,7 +164,7 @@ const eventTool: AgentTool<any> = {
   }),
   execute: async (_id, params) => {
     const { name } = params as { name: string };
-    pendingCommands.push({ type: 'trigger_event', name });
+    emitCommand({ type: 'trigger_event', name });
     return ok(`你脑中浮现情景 ${name}，反射系统即将自动响应`);
   },
 };
@@ -248,6 +248,18 @@ function json(res: ServerResponse, status: number, data: unknown): void {
 // 串行化对话请求，避免并发 prompt
 let chain: Promise<unknown> = Promise.resolve();
 
+/** 工具执行 → 指令入队 + 实时通知（SSE 边说边动） */
+let onCommandEmitted: ((cmd: AgentCommand) => void) | null = null;
+function emitCommand(cmd: AgentCommand): void {
+  pendingCommands.push(cmd);
+  onCommandEmitted?.(cmd);
+}
+
+/** SSE 事件写出 */
+function sseSend(res: ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
 async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') return json(res, 405, { error: 'method_not_allowed' });
   try {
@@ -268,22 +280,79 @@ async function handleChat(req: IncomingMessage, res: ServerResponse): Promise<vo
     pendingCommands = [];
     toolTrace = [];
 
-    const run = chain.then(async () => {
-      await agent.prompt(message);
-      return {
-        reply: extractReply(agent),
-        commands: pendingCommands.splice(0),
-        tools: [...toolTrace],
-        model: `${(await resolveModel())!.provider}/${(await resolveModel())!.id}`,
-      };
+    // SSE 流式响应
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
     });
+    let closed = false;
+    req.on('close', () => { closed = true; });
+    const send = (event: string, data: unknown) => {
+      if (!closed) sseSend(res, event, data);
+    };
+
+    const m = await resolveModel();
+    send('meta', { model: m ? `${m.provider}/${m.id}` : '' });
+
+    // 串行执行；执行期间把 Agent 流事件转发为 SSE
+    const run = chain.then(
+      () =>
+        new Promise<void>((resolveRun) => {
+          const unsubscribe = agent.subscribe((event) => {
+            // 文本增量 → 流式回复
+            if (event.type === 'message_update') {
+              const ame = event.assistantMessageEvent as { type?: string; delta?: string };
+              if (ame?.type === 'text_delta' && ame.delta) send('delta', { text: ame.delta });
+              return;
+            }
+            // 工具调用开始 → 实时轨迹
+            if (event.type === 'tool_execution_start') {
+              const ev = event as unknown as { toolName: string; args: unknown };
+              send('tool', { tool: ev.toolName, args: ev.args });
+              return;
+            }
+            if (event.type === 'agent_end') {
+              resolveRun();
+            }
+          });
+          onCommandEmitted = (cmd) => send('command', cmd);
+          // prompt 完成或失败都要结束本次流；订阅随即移除
+          agent
+            .prompt(message)
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              send('error', { error: `agent_error: ${msg}` });
+            })
+            .finally(() => {
+              onCommandEmitted = null;
+              unsubscribe();
+              resolveRun();
+            });
+        }),
+    );
     chain = run.catch(() => undefined); // 防断链
-    const result = (await run) as Awaited<typeof run>;
-    return json(res, 200, result);
+
+    await run;
+    if (closed) return;
+    const model = await resolveModel();
+    sseSend(res, 'done', {
+      reply: extractReply(agent),
+      commands: pendingCommands.splice(0),
+      tools: [...toolTrace],
+      model: model ? `${model.provider}/${model.id}` : '',
+    });
+    res.end();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[pi-agent] chat error:', msg);
-    return json(res, 500, { error: `agent_error: ${msg}` });
+    // SSE 已开始则流内报错，否则普通 JSON 错误
+    if (res.headersSent && !res.writableEnded) {
+      sseSend(res, 'error', { error: `agent_error: ${msg}` });
+      res.end();
+    } else {
+      return json(res, 500, { error: `agent_error: ${msg}` });
+    }
   }
 }
 

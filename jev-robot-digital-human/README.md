@@ -14,7 +14,7 @@
 - **置信度门控**：决策置信度低于阈值时强制回退到安全的 `idle` 动作
 - **类型化决策 schema**：动作(choice) + 表情(choice) + 强度(score) + 朝向(noul)，输出概率分布与置信度
 - **Pi 智能体工具集**：`get_robot_state` / `set_robot_intent` / `command_robot` / `trigger_scene_event`，指令经浏览器侧安全应用
-- **对话界面（主交互）**：右侧面板对话区，展示回复、工具调用轨迹，指令一键应用；参数配置收入弹出窗口
+- **对话界面（主交互）**：右侧面板对话区，SSE 流式回复逐字显示、工具轨迹实时追加、指令边说边动；参数配置收入弹出窗口
 - **真实 GLB 数字人**：RobotExpressive / Xbot，骨骼动画 crossfade 平滑切换，morph 表情
 - **实时可视化**：决策概率条、置信度、门控判定、决策历史、感知状态 JSON
 - **场景事件模拟**：用户走近 / 前进 / 障碍物 / 指引 / 庆祝 / 不确定 → 触发新一轮决策
@@ -55,12 +55,12 @@ npm run typecheck   # tsc --noEmit 类型校验
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │  对话层  ui/chat.ts + index.html（右侧面板主交互区）           │
-│  自然语言输入 → /api/agent/chat → 回复 + 工具轨迹 + 指令应用     │
+│  自然语言输入 → /api/agent/chat → SSE 流式回复 + 工具轨迹 + 指令  │
 ├──────────────────────────────────────────────────────────────┤
 │  智能体层（System Two · 服务端）  server/pi-agent.ts           │
 │  Pi Agent 单例 + DeepSeek · 4 个机器人工具 · 请求串行化          │
 │  GET  /api/agent/health   健康检查（模型是否可用）               │
-│  POST /api/agent/chat     对话（返回 reply + toolTrace + 命令） │
+│  POST /api/agent/chat     对话（SSE 流式：delta/tool/command）  │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层  ui/panel.ts + index.html                              │
 │  面板绑定 · 决策可视化(概率/历史) · 场景事件按钮                  │
@@ -84,25 +84,32 @@ npm run typecheck   # tsc --noEmit 类型校验
 
 ### 双决策闭环
 
-**System One（Jev 快思考，浏览器内自动循环）：**
+**架构定位：Jev 快决策是外层循环（宿主），慢思考是内层循环（被消息触发）；内层的一切行为统一回流外层状态。**
+
+**外层循环（System One · Jev 快思考，浏览器内永续）：**
 
 ```
-场景事件 / 环境漂移 → env {intent, userProximity, obstacleAhead, energy}
+场景事件 / 环境漂移 / 行为回流 → env {intent, userProximity, obstacleAhead, energy,
+                                      currentAction, recentActions, socialDrive, ...}
   → engine.decide(env)                     [真实 Jev，失败 idle 兜底]
+     state 含 currentMotion/actionSource/actionElapsedSec：
+     Jev 知道"我此刻在做什么、做了多久、谁发起的"，不会无脑打断内层行为
   → 置信度门控 (confidence < gate → motion 强制 idle)
   → panel.setDecision()                    [概率条 / 置信度 / 历史]
   → avatar.setDecision({motion, expression, intensity})
-  → AnimationMixer crossfade 播放
+  → sim.noteAction(applied, 'jev-loop')    [行为回流：下一轮决策可见]
 ```
 
-**消息响应决策（Jev 并行打分，「回复」也是动作）：**
+**内层循环（消息触发，输出回流外层）：**
 
 ```
 用户消息 → engine.decideMessage(env, message)
-  每个动作（含 reply「说话」）独立 noul 打分，阈值(0.5)以上同时执行：
+  每个动作（含 reply「说话」）独立 noul 打分（instructions 注入当前动作状态），
+  阈值(0.5)以上同时执行：
   → 舞动 68%✓ + 回复 67%✓ → 边跳舞边唤醒 Pi 生成语言回复
   → 仅动作触发（如舞动 98%）→ 快反射直接执行，零 LLM 调用
   → 仅回复触发 → 纯慢思考对话
+  → 执行后 sim.perceive(agent_action/agent_reply) 回流外层 env
 ```
 
 **System Two（Pi 慢思考，服务端智能体）：**
@@ -110,27 +117,38 @@ npm run typecheck   # tsc --noEmit 类型校验
 ```
 用户对话 → POST /api/agent/chat {message, env, lastDecision}
   → Pi Agent (DeepSeek) 慢思考，按需调用工具：
-     get_robot_state     读取当前环境/决策状态
+     get_robot_state     读取当前环境/决策/行为状态
      set_robot_intent    修改机器人意图（patchEnv）
      command_robot       直接下发动作/表情/强度/朝向
      trigger_scene_event 注入场景事件（走 Jev 快思考响应）
-  → 响应 {reply, toolTrace, commands}
-  → 浏览器按序应用：set_intent → sim.patchEnv()
-                   command → 合成 decision → avatar 执行
-                   trigger_event → sim.triggerEvent()
+  → SSE 流式响应（浏览器手动读流解析，边生成边显示、边执行）：
+     meta    {model}                                    模型标识
+     delta   {text}                                     文本增量 → 气泡逐字追加
+     tool    {tool, args}                               工具开始 → 轨迹实时追加
+     command {AgentCommand}                             工具执行即下发 → 边说边动
+     error   {error}                                    异常
+     done    {reply, commands, tools, model}            收尾（最终全文 + 指令汇总）
+  → 浏览器按序应用并回流外层：
+     set_intent → sim.patchEnv()          [意图入 env]
+     command   → 合成 decision → avatar 执行 → perceive(agent_action)
+                 → sim.noteAction(motion, expression, 'pi')  [行为状态入 env]
+     trigger_event → sim.triggerEvent()   [事件入 env]
+     回复文本 → perceive(agent_reply)      [交互摘要入 env]
 ```
+
+**行为回环（状态账本统一）**：无论行为来自外层 Jev 决策（`jev-loop`）、消息快反射（`jev-route`）还是慢思考指令（`pi`），执行后都经 `sim.noteAction()` 写入 `env.currentAction`（当前动作/表情/来源/起始时间）与 `env.recentActions`（最近 5 条历史）。外层循环每轮决策都能看到"我此刻在做什么、做了多久、谁发起的"，实现真正的持续感知-决策-执行链。
 
 ### 模块说明
 
 | 模块 | 职责 |
 |---|---|
 | `src/main.ts` | 装配根：场景/相机/渲染循环，panel ↔ sim ↔ avatar 接线，智能体指令应用，数字人切换（GLB 按包围盒归一化身高、脚底贴地） |
-| `src/loop.ts` | `Simulation`：环境状态、能量漂移、定时步进决策、置信度门控、`patchEnv` 意图修正 |
-| `src/jev/decision-engine.ts` | 引擎工厂 `createEngine(auto/real/local)`；真实引擎失败自动降级 |
+| `src/loop.ts` | `Simulation`：环境状态、能量漂移、定时步进决策、置信度门控、`patchEnv` 意图修正、感知入环 `perceive`、行为回流 `noteAction`（内/外层行为统一账本） |
+| `src/jev/decision-engine.ts` | 唯一真实引擎 `RealJevEngine`（LocalMockEngine 已移除）；失败上抛，由调用方以 `idle` 兜底 |
 | `src/jev/semantics.ts` | 核心抽象：`buildQuestions` / `buildState` / `normalizeDecision`，两种引擎共用同一 schema |
 | `src/jev/jev-client.ts` | 纯 HTTP 客户端，超时与错误处理，不含 UI 逻辑 |
 | `src/ui/panel.ts` | 纯 DOM 组件：事件绑定、回调上抛、决策可视化 |
-| `src/ui/chat.ts` | 对话舱组件：健康检查、消息收发、工具轨迹渲染、指令应用 |
+| `src/ui/chat.ts` | 对话舱组件：健康检查、消息收发、SSE 流式解析（逐字显示 + 实时指令）、工具轨迹渲染 |
 | `src/avatar/gltf-avatar.ts` | 执行器：GLB 加载、动画剪辑模糊匹配、crossfade 切换、morph 表情 |
 | `server/pi-agent.ts` | Pi Agent 单例 + Vite 插件：模型解析（DeepSeek 优先）、4 个机器人工具、请求串行化 |
 

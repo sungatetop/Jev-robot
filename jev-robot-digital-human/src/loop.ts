@@ -17,7 +17,7 @@ import type { EnvState, RobotDecision, DecisionPayload, DecisionEngine } from '.
 /** 感知事件：真实刺激（用户消息/智能体行为）进入感知循环的统一入口 */
 export type PerceptionEvent =
   | { type: 'user_message'; text: string; ts: number }
-  | { type: 'agent_action'; motion: string; by: string; ts: number }
+  | { type: 'agent_action'; motion: string; expression?: string; by: string; ts: number }
   | { type: 'agent_reply'; summary: string; ts: number }
   | { type: 'scene_event'; name: string; ts: number };
 
@@ -65,8 +65,31 @@ export class Simulation {
       socialDrive: 0,
       recentInteraction: '',
       memoryDirty: false,
+      currentAction: null,
+      recentActions: [],
       ...extra,
     };
+  }
+
+  /* ---------- 行为状态回环：一切行为统一回流外层循环 ---------- */
+
+  /**
+   * 行为回流：一次动作真正执行后调用（无论来源），外层下一轮决策即可见。
+   * 同一动作延续时不重置起始时间（"跳舞已跳了 N 秒"对决策可见）。
+   * @param source 行为来源 'jev-loop' | 'pi' | 'jev-route'
+   */
+  noteAction(motion: string, expression: string, source: string): void {
+    const cur = this.env.currentAction;
+    if (cur && cur.motion === motion) {
+      // 延续：保留起始时间，仅刷新表情与来源（行为主权转移可见）
+      cur.expression = expression;
+      cur.source = source;
+    } else {
+      this.env.currentAction = { motion, expression, source, since: Date.now() };
+      this.env.recentActions = [`${motion}(${source})`, ...(this.env.recentActions ?? [])].slice(0, 5);
+      this.env.memoryDirty = true;
+    }
+    this.onEnv({ ...this.env });
   }
 
   /* ---------- P1 感知入环：真实刺激即时更新 env ---------- */
@@ -86,8 +109,9 @@ export class Simulation {
         this.env.memoryDirty = true;
         break;
       case 'agent_action':
-        this.env.recentInteraction = `我刚做了动作 ${evt.motion}（来自 ${evt.by}）`;
-        this.env.memoryDirty = true;
+        // 行为回流：内层（快反射/慢思考）执行的动作进入外层行为状态
+        this.noteAction(evt.motion, evt.expression ?? 'neutral', evt.by);
+        this.env.recentInteraction = `我刚做了动作 ${evt.motion}（来自 ${evt.by === 'jev-route' ? '消息快反射' : evt.by === 'pi' ? '慢思考' : evt.by}）`;
         break;
       case 'agent_reply':
         this.env.recentInteraction = `我刚回复了: "${evt.summary.slice(0, 40)}"`;
@@ -197,6 +221,8 @@ export class Simulation {
     };
     if (gated) this.onGated(payload);
     this.onDecision(payload);
+    // 行为回流：外层循环自身的决策也进入行为状态（内层/外层行为同一账本）
+    this.noteAction(applied.motion, applied.expression, 'jev-loop');
     return payload;
   }
 

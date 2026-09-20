@@ -1,5 +1,5 @@
 /** 决策引擎统一接口与共享类型（浏览器端与工具层共用）。 */
-export type { EnvState, RobotDecision, DecisionPayload, AgentCommand, Motion, Expression, MessageResponseDecision, MessageActionScore } from './semantics.js';
+export type { EnvState, CurrentAction, RobotDecision, DecisionPayload, AgentCommand, Motion, Expression, MessageResponseDecision, MessageActionScore } from './semantics.js';
 import type { EnvState, RobotDecision, MessageResponseDecision } from './semantics.js';
 
 export interface DecisionEngine {

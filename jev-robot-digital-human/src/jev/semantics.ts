@@ -10,6 +10,16 @@
 export type Motion = 'idle' | 'walk' | 'wave' | 'dance' | 'point' | 'shrug' | 'march' | 'reply';
 export type Expression = 'neutral' | 'happy' | 'sad' | 'surprised' | 'angry';
 
+/** 当前行为状态：机器人此刻正在做什么（一切行为统一回流外层循环的载体） */
+export interface CurrentAction {
+  motion: string;
+  expression: string;
+  /** 行为来源：'jev-loop'（外层循环决策）/ 'pi'（慢思考）/ 'jev-route'（消息快反射） */
+  source: string;
+  /** 本段动作起始时间戳 ms（同一动作延续不重置，供决策判断"做了多久"） */
+  since: number;
+}
+
 export interface EnvState {
   intent: string;
   userProximity: number; // 0 近 .. 1 远
@@ -22,6 +32,9 @@ export interface EnvState {
   socialDrive: number; // 0..1 社交驱动（对话热度），用户消息抬升、随时间衰减
   recentInteraction: string; // 最近交互摘要（用户说了什么/我刚做了什么），供决策理解上下文
   memoryDirty: boolean; // 有未整理的新记忆（P3 idle 整理用）
+  /* ---- 行为状态回环：外层决策/内层快反射/慢思考指令的动作统一回流 ---- */
+  currentAction: CurrentAction | null; // 此刻正在做的动作
+  recentActions: string[]; // 最近动作历史（新在前，最多 5 条，如 "dance(pi)"）
 }
 
 /** 归一化后的决策意图（控制器/执行器直接消费） */
@@ -171,6 +184,11 @@ export function buildMessageQuestions(
 ): Record<string, JevQuestion> {
   const base = buildQuestions(env);
   const msg = (message || '').trim();
+  // 行为回环：打分时让 Jev 知道机器人此刻正在做什么、做了多久
+  const act = env.currentAction;
+  const doing = act
+    ? `The robot is CURRENTLY doing ${act.motion} (expression ${act.expression}, started by ${act.source}, for ${Math.round((Date.now() - act.since) / 1000)}s). `
+    : '';
   const questions: Record<string, JevQuestion> = {
     expression: base.expression!,
     intensity: base.intensity!,
@@ -180,7 +198,7 @@ export function buildMessageQuestions(
     questions[m] = {
       type: 'noul',
       instructions:
-        `The user just said to the robot: "${msg}". `
+        `The user just said to the robot: "${msg}". ` + doing
         + `Rate INDEPENDENTLY whether the robot should ${MESSAGE_MOTION_DESC[m]} `
         + '(0 = definitely not, 1 = definitely yes). '
         + 'Multiple actions can be true simultaneously — e.g. answer verbally while waving.',
@@ -243,11 +261,16 @@ export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQ
     shrug: 'Uncertain or no clear way to help; shrug shoulders.',
     march: 'Energize or keep cadence; step in place with higher energy.',
   };
+  // 行为回环：外层决策知道"我此刻在做什么、做了多久"，避免无脑打断内层行为
+  const act = ctx.currentAction;
+  const doing = act
+    ? ` The robot is CURRENTLY doing ${act.motion} (started by ${act.source}, for ${Math.round((Date.now() - act.since) / 1000)}s) — keep or change deliberately, don't cut it off without reason.`
+    : '';
   return {
     action: {
       type: 'choice',
       instructions:
-        'Given the robot digital-human state, which single motion should it perform next?',
+        'Given the robot digital-human state, which single motion should it perform next?' + doing,
       criteria: actionOptions,
     },
     expression: {
@@ -280,10 +303,11 @@ export function buildQuestions(ctx: Partial<EnvState> = {}): Record<string, JevQ
 }
 
 /**
- * 组装发送给引擎的 state（感知观测 + 内部状态）。
- * @param env 模拟环境信号 {intent, userProximity, obstacleAhead, energy}
+ * 组装发送给引擎的 state（感知观测 + 内部状态 + 行为状态）。
+ * @param env 模拟环境信号 {intent, userProximity, obstacleAhead, energy, currentAction...}
  */
 export function buildState(env: EnvState) {
+  const act = env.currentAction;
   return {
     intent: env.intent,
     userProximity: +(env.userProximity ?? 0).toFixed(2),
@@ -295,6 +319,12 @@ export function buildState(env: EnvState) {
     socialDrive: +(env.socialDrive ?? 0).toFixed(2),
     recentInteraction: env.recentInteraction ?? '',
     memoryDirty: !!env.memoryDirty,
+    /* 行为状态：外层决策能看到"我此刻在做什么、做了多久、谁发起的" */
+    currentMotion: act?.motion ?? null,
+    currentExpression: act?.expression ?? null,
+    actionSource: act?.source ?? null,
+    actionElapsedSec: act ? Math.round((Date.now() - act.since) / 1000) : null,
+    recentActions: env.recentActions ?? [],
   };
 }
 

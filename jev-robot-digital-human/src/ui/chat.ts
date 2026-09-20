@@ -8,14 +8,6 @@ import { MOTION_LABEL } from '../jev/semantics.js';
 import type { AgentCommand, EnvState, DecisionPayload, MessageResponseDecision } from '../jev/types.js';
 import type { PerceptionEvent } from '../loop.js';
 
-interface AgentChatResponse {
-  reply?: string;
-  commands?: AgentCommand[];
-  tools?: Array<{ tool: string; args?: unknown }>;
-  model?: string;
-  error?: string;
-}
-
 export interface ChatPanelOptions {
   getEnv: () => EnvState;
   getLastDecision: () => DecisionPayload | null;
@@ -94,11 +86,6 @@ export class ChatPanel {
     return { root, bubble };
   }
 
-  private _appendToolTrace(tools: Array<{ tool: string; args?: unknown }>): string {
-    if (!tools.length) return '';
-    return tools.map((t) => `🔧 ${t.tool} ${JSON.stringify(t.args ?? {})}`).join('\n');
-  }
-
   /** 路由 trace：并行打分一览 + 执行计划 */
   private _routeTrace(route: MessageResponseDecision, executed: string[]): string {
     const engine = route.engine === 'jev' ? '真实 Jev' : 'Jev 决策';
@@ -168,7 +155,7 @@ export class ChatPanel {
       return;
     }
 
-    // ③b 唤醒慢思考：Pi Agent 生成语言回复（动作已并行执行）
+    // ③b 唤醒慢思考：Pi Agent 生成语言回复（SSE 流式：边生成边显示，指令实时执行）
     pending.bubble.textContent = bodyMotion ? '边做动作边想…' : '思考中…';
     const routeLine = route
       ? this._routeTrace(route, executed) + '\n'
@@ -183,25 +170,81 @@ export class ChatPanel {
           lastDecision: this.opts.getLastDecision(),
         }),
       });
-      const data = (await res.json()) as AgentChatResponse;
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-
-      pending.bubble.textContent = data.reply || '(无文本回复)';
-      const trace = this._appendToolTrace(data.tools || []);
-      const fullTrace = routeLine + trace;
-      if (fullTrace.trim()) {
-        const t = document.createElement('div');
-        t.className = 'chat-trace';
-        t.textContent = fullTrace;
-        pending.root.appendChild(t);
+      if (!res.ok || !res.body) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(d.error || `HTTP ${res.status}`);
       }
-      for (const cmd of data.commands || []) this.opts.applyCommand(cmd);
-      // 感知入环：Pi 的语言回复也是一次行为
-      if (data.reply) this.opts.perceive({ type: 'agent_reply', summary: data.reply, ts: Date.now() });
-      if (data.model) {
-        this.status.textContent = `● ${data.model}`;
+
+      // 实时 trace 区（路由行 + 工具行随事件追加）
+      const t = document.createElement('div');
+      t.className = 'chat-trace';
+      t.textContent = routeLine;
+      pending.root.appendChild(t);
+      const toolLines: string[] = [];
+      const renderTrace = () => {
+        t.textContent = routeLine + (toolLines.length ? toolLines.join('\n') : '');
+      };
+
+      let firstDelta = true;
+      let finalModel = '';
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      const handleEvent = (ev: string, data: Record<string, unknown>) => {
+        switch (ev) {
+          case 'meta':
+            finalModel = String(data.model || '');
+            break;
+          case 'delta': {
+            if (firstDelta) {
+              pending.bubble.textContent = '';
+              firstDelta = false;
+            }
+            pending.bubble.textContent += String(data.text || '');
+            this.body.scrollTop = this.body.scrollHeight;
+            break;
+          }
+          case 'tool': {
+            const args = JSON.stringify(data.args ?? {});
+            toolLines.push(`🔧 ${String(data.tool)} ${args.length > 120 ? args.slice(0, 120) + '…' : args}`);
+            renderTrace();
+            this.body.scrollTop = this.body.scrollHeight;
+            break;
+          }
+          case 'command':
+            // 边说边动：工具执行即应用指令，不等回复结束
+            this.opts.applyCommand(data as unknown as AgentCommand);
+            break;
+          case 'error':
+            throw new Error(String(data.error || 'agent_error'));
+          default:
+            break;
+        }
+      };
+
+      // 解析 SSE（POST fetch 无 EventSource，手动读流）
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop() ?? '';
+        for (const part of parts) {
+          const lines = part.split('\n');
+          const ev = lines.find((l) => l.startsWith('event: '))?.slice(7).trim();
+          const dataLine = lines.find((l) => l.startsWith('data: '))?.slice(6);
+          if (ev && dataLine) handleEvent(ev, JSON.parse(dataLine) as Record<string, unknown>);
+        }
+      }
+
+      if (firstDelta) pending.bubble.textContent = '(无文本回复)';
+      if (finalModel) {
+        this.status.textContent = `● ${finalModel}`;
         this.status.className = 'chat-status ok';
       }
+      // 感知入环：Pi 的语言回复也是一次行为
+      const full = pending.bubble.textContent;
+      if (full && full !== '(无文本回复)') this.opts.perceive({ type: 'agent_reply', summary: full, ts: Date.now() });
     } catch (err) {
       pending.bubble.textContent = '⚠️ ' + (err instanceof Error ? err.message : String(err));
       pending.root.classList.add('err');

@@ -111,8 +111,9 @@ function applyAgentCommand(cmd: AgentCommand): void {
         engine: d.engine ?? 'pi-agent',
         ts: Date.now(),
       });
-      // 感知入环：指令执行回流感知循环（下次自主决策知道"我刚做过什么"）
-      sim.perceive({ type: 'agent_action', motion: cmd.motion, by: d.engine === 'jev' ? 'Jev 路由' : 'Pi', ts: Date.now() });
+      // 感知入环：指令执行回流感知循环（行为状态 + 摘要，下次自主决策知道"我刚做过什么"）
+      const source = d.engine === 'jev' ? 'jev-route' : 'pi';
+      sim.perceive({ type: 'agent_action', motion: cmd.motion, expression: d.expression, by: source, ts: Date.now() });
       console.info('[pi-agent] command:', cmd.motion);
       break;
     }
