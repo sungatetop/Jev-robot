@@ -64,6 +64,20 @@
 - **Key 安全**：所有 API Key 仅存服务端（Vite 中间件代理），浏览器零接触。
 - **执行器归一化**：GLB 模型按包围盒归一化身高、脚底贴地，动画 crossfade 平滑切换、morph 表情，可插拔更换数字人。
 
+## 运行预览
+
+**初始加载**（循环未启动，数字人待机）：
+
+![初始加载](./jev-robot-digital-human/docs/screenshot-01-initial-load.png)
+
+**循环运行中**（Jev 决策循环开启，概率条与决策历史实时刷新）：
+
+![循环运行中](./jev-robot-digital-human/docs/screenshot-02-loop-running.png)
+
+**对话交互 · 慢思考回复**（Pi 流式回复 + 快反射挥手并行执行）：
+
+![对话交互](./jev-robot-digital-human/docs/screenshot-04-pi-reply.png)
+
 ## 快速开始
 
 环境要求：Node.js 18+。
